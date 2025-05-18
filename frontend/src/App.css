@@ -1,0 +1,66 @@
+.App {
+  text-align: center;
+}
+
+.App-header {
+  background-color: #282c34;
+  min-height: 10vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(10px + 2vmin);
+  color: white;
+  margin-bottom: 20px;
+}
+
+.game-layout {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-around;
+  padding: 10px;
+}
+
+.main-game-area {
+  flex-grow: 2;
+  display: flex;
+  flex-direction: column;
+  margin-right: 10px;
+  max-width: 70%;
+}
+
+.side-panel {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #ccc;
+  padding: 10px;
+  max-width: 30%;
+}
+
+/* Add more specific styles for components later */
+.town-square {
+  border: 1px solid lightblue;
+  padding: 10px;
+  margin-bottom: 10px;
+  min-height: 200px;
+}
+
+.chat-panel {
+  border: 1px solid lightgreen;
+  padding: 10px;
+  height: 300px;
+  overflow-y: scroll;
+}
+
+.private-info-panel {
+  border: 1px solid lightcoral;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.controls {
+  border: 1px solid lightgoldenrodyellow;
+  padding: 10px;
+  margin-bottom: 10px;
+} 
