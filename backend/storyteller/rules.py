@@ -92,7 +92,7 @@ class RuleEnforcer:
                 "known_minions": minion_names or ["No Minions in play"],
                 "demon_bluffs": self.grimoire.demon_bluffs or ["No bluffs available"]
             }
-            await self.game_manager.send_personal_message(demon_id, "PRIVATE_NIGHT_INFO", private_update_payload)
+            await self._send_private_night_info(demon_id, private_update_payload)
             self.grimoire.log_event("ABILITY_USE", {"role": "Imp", "player_id": demon_id, "action": "Received minion/bluff info"})
 
         #minions learn the demon
@@ -102,7 +102,7 @@ class RuleEnforcer:
                 role_details = get_role_details(self.grimoire.get_player_role(minion_id))
                 if role_details.get("knows_demon"):
                     private_update_payload = {"known_demon": demon_name}
-                    await self.game_manager.send_personal_message(minion_id, "PRIVATE_NIGHT_INFO", private_update_payload)
+                    await self._send_private_night_info(minion_id, private_update_payload)
                     self.grimoire.log_event("ABILITY_USE", {"role": self.grimoire.get_player_role(minion_id), "player_id": minion_id, "action": f"Learned Demon is {demon_name}"})
 
         #first night for specific roles (Washerwoman, Librarian, Investigator, Chef, Empath, Fortune Teller)
@@ -129,11 +129,11 @@ class RuleEnforcer:
                                                self.grimoire.game_state.get("player_names",{}).get(p2_other, p2_other)], 2)
                     
                     info_text = f"One of these two players ({pair_to_show[0]}, {pair_to_show[1]}) is the {target_townsfolk_role}."
-                    await self.game_manager.send_personal_message(ww_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":0, "text": info_text}]})
+                    await self._send_private_night_info(ww_id, {"clues":[{"night":0, "text": info_text}]})
                     self.grimoire.log_event("ABILITY_USE", {"role": "Washerwoman", "player_id": ww_id, "info_provided": info_text})
             else:
                 self.grimoire.storyteller_log.append("WW: No other townsfolk in play to give info about.")
-                await self.game_manager.send_personal_message(ww_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":0, "text": "No specific townsfolk information available this game."}]})
+                await self._send_private_night_info(ww_id, {"clues":[{"night":0, "text": "No specific townsfolk information available this game."}]})
 
         #todo: Implement similar logic for Librarian, Investigator, Chef, Empath (0 evil neighbors), Fortune Teller (initial ping + red herring info)
         #for Fortune Teller: needs to pick two players, or be given info about their pick and red herring.
@@ -261,7 +261,7 @@ class RuleEnforcer:
                 if target_id and self.grimoire.is_player_alive(target_id) and target_id != player_id:
                     self.grimoire.update_status(target_id, "protected_by_monk", True)
                     self.grimoire.log_event("ABILITY_USE", {"role": "Monk", "player_id": player_id, "target": target_id, "result":"protected"})
-                    if self.game_manager: await self.game_manager.send_personal_message(player_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": f"You protected {target_id}."}]})
+                    if self.game_manager: await self._send_private_night_info(player_id, {"clues":[{"night":self.grimoire.day_number, "text": f"You protected {target_id}."}]})
 
         #2. Poisoning (Poisoner)
         #... similar logic ...
@@ -277,10 +277,10 @@ class RuleEnforcer:
                     #soldier is safe from demon
                     if self.grimoire.get_player_role(target_id) == "Soldier":
                         self.grimoire.log_event("ABILITY_INTERACTION", {"killer_role": "Imp", "target_role": "Soldier", "result": "Soldier safe"})
-                        if self.game_manager: await self.game_manager.send_personal_message(player_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": f"Your target {target_id} was a Soldier and survived."}]})
+                        if self.game_manager: await self._send_private_night_info(player_id, {"clues":[{"night":self.grimoire.day_number, "text": f"Your target {target_id} was a Soldier and survived."}]})
                     elif self.grimoire.get_player_status(target_id, "protected_by_monk"):
                         self.grimoire.log_event("ABILITY_INTERACTION", {"killer_role": "Imp", "target_role": self.grimoire.get_player_role(target_id), "protector":"Monk", "result": "Target protected"})
-                        if self.game_manager: await self.game_manager.send_personal_message(player_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": f"Your target {target_id} was protected by the Monk and survived."}]})
+                        if self.game_manager: await self._send_private_night_info(player_id, {"clues":[{"night":self.grimoire.day_number, "text": f"Your target {target_id} was protected by the Monk and survived."}]})
                     else:
                         demon_kill_target = target_id
                 break #only one demon kill
@@ -296,14 +296,14 @@ class RuleEnforcer:
                     if self.grimoire.is_player_alive(sw_id):
                         self.grimoire.roles[sw_id] = "Imp" #promoted
                         self.grimoire.log_event("ROLE_CHANGE", {"player_id": sw_id, "old_role": "Scarlet Woman", "new_role": "Imp"})
-                        if self.game_manager: await self.game_manager.send_personal_message(sw_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": "The Imp killed themselves. You are now the Imp!"}]})
+                        if self.game_manager: await self._send_private_night_info(sw_id, {"clues":[{"night":self.grimoire.day_number, "text": "The Imp killed themselves. You are now the Imp!"}]})
                         #new Imp does not act this night
                 else: #no SW or not enough players, evil loses if no other demons
                     if not self.grimoire.get_player_ids_by_alignment(RoleAlignment.EVIL.value): #check if any evil players left
                          self.grimoire.log_event("GAME_END_CONDITION", {"reason": "Imp suicide, no valid promotion, no demons left.", "winner": RoleAlignment.GOOD.value})
             else:
                 self._execute_player(demon_kill_target, "Killed by the Demon")
-                if self.game_manager: await self.game_manager.send_personal_message(demon_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": f"You killed {demon_kill_target}."}]})
+                if self.game_manager: await self._send_private_night_info(demon_id, {"clues":[{"night":self.grimoire.day_number, "text": f"You killed {demon_kill_target}."}]})
 
         #4. Information gathering (Empath, Spy, Undertaker, Ravenkeeper if died)
         #... logic for these roles to get their info ...
@@ -324,7 +324,7 @@ class RuleEnforcer:
                     evil_neighbors +=1
                 #handle drunk/poisoned for Empath - they get false info
                 #for now, assume correct info
-                await self.game_manager.send_personal_message(empath_id, "PRIVATE_NIGHT_INFO", {"clues":[{"night":self.grimoire.day_number, "text": f"You sensed {evil_neighbors} evil neighbors."}]})
+                await self._send_private_night_info(empath_id, {"clues":[{"night":self.grimoire.day_number, "text": f"You sensed {evil_neighbors} evil neighbors."}]})
                 self.grimoire.log_event("ABILITY_USE", {"role": "Empath", "player_id": empath_id, "result": f"{evil_neighbors} evil neighbors"})
 
         self.grimoire.log_event("NIGHT_ABILITIES", {"status": "completed"})
@@ -396,3 +396,13 @@ class RuleEnforcer:
                    return True, RoleAlignment.GOOD.value
 
         return False, None #no victory condition met 
+
+    async def _send_private_night_info(self, player_id: str, payload: Dict[str, Any]):
+        # record private clue in grimoire then send to player
+        self.grimoire.add_private_clue(player_id, payload)
+        if self.game_manager:
+            await self.game_manager.send_personal_message(player_id, "PRIVATE_NIGHT_INFO", payload)
+
+    def get_player_knowledge(self, player_id: str) -> List[Any]:
+        """Return all private clues that a player has received so far."""
+        return self.grimoire.get_private_clues(player_id) 

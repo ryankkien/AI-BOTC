@@ -15,6 +15,7 @@ class Grimoire:
         self.demon_bluffs: List[str] = [] #list of 3 role names given to the demon as bluffs
         self.fortune_teller_red_herring: Optional[str] = None #player_id picked as red herring
         self.storyteller_log: List[str] = [] #internal log for storyteller/debug
+        self.private_clues: Dict[str, List[Any]] = {} #player_id -> list of private clues
 
     def add_player(self, player_id: str, role: str, alignment: str):
         if player_id not in self.players:
@@ -32,6 +33,8 @@ class Grimoire:
             "used_slayer_ability": False,
             #add other relevant statuses here
         }
+        # initialize private clues list for this player
+        self.private_clues[player_id] = []
         self.log_event("PLAYER_ADDED", {"player_id": player_id, "role": role, "alignment": alignment})
 
     def update_status(self, player_id: str, status_key: str, value: Any):
@@ -99,5 +102,17 @@ class Grimoire:
     
     def get_alive_players(self) -> List[str]:
         return [pid for pid in self.players if self.is_player_alive(pid)]
+
+    def add_private_clue(self, player_id: str, clue: Any):
+        """Record a private clue for a player."""
+        if player_id not in self.private_clues:
+            self.private_clues[player_id] = []
+        self.private_clues[player_id].append(clue)
+        # also log the private info event in game log
+        self.log_event("PRIVATE_INFO", {"player_id": player_id, "clue": clue})
+
+    def get_private_clues(self, player_id: str) -> List[Any]:
+        """Retrieve all private clues that have been recorded for a player."""
+        return self.private_clues.get(player_id, [])
 
     #add more getter/setter methods as needed for game state management 
