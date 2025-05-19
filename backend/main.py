@@ -181,10 +181,89 @@ class GameManager:
         self._nomination_order: List[str] = []
         self._daily_chat_log: List[Dict[str,str]] = [] #to feed to agents for day decisions
         # initialize LLM-based storyteller
-        self.storyteller_agent = StorytellerAgent(api_key=self.google_api_key)
+        self.storyteller_agent = StorytellerAgent(api_key=self.google_api_key, game_manager=self)
 
     def is_game_running(self) -> bool:
         return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set() #game is running if setup and loop started
+
+    async def _get_ai_player_action(self, player_id: str, action_id: str, action_type: str, action_details: Dict[str, Any]):
+        agent = self.agents.get(player_id)
+        if not agent or not self.grimoire or not self.grimoire.is_player_alive(player_id):
+            print(f"Cannot get action for {player_id}: Not an active AI agent.")
+            # Store a None or error action if ST LLM is awaiting this player
+            if action_id in self.pending_storyteller_actions and player_id in self.pending_storyteller_actions[action_id]["expected_players"]:
+                 self.pending_storyteller_actions[action_id]["received_actions"][player_id] = {"action_type": "ERROR_NO_ACTION_POSSIBLE"}
+            return
+
+        # Prepare game state context for the agent (similar to how _collect_ai_night_actions used to do)
+        # This might need to be slightly adapted based on what each agent.decide_X method expects.
+        # For now, a generic public summary + action_details from ST LLM.
+        game_state_summary_for_agent = self._get_public_game_state_summary(f"Storyteller request: {action_type}")
+        # Add specific details from the ST LLM's request
+        game_state_summary_for_agent.update(action_details) 
+        # Add full daily chat log as PlayerAgents expect it
+        game_state_summary_for_agent["daily_chat_log"] = list(self._daily_chat_log)
+        game_state_summary_for_agent["all_players_details"] = [
+            {"id": p_id, "name": self.grimoire.game_state.get("player_names", {}).get(p_id, p_id), "is_alive": self.grimoire.is_player_alive(p_id)}
+            for p_id in self.grimoire.players
+        ]
+
+        action_result = None
+        print(f"Requesting '{action_type}' from AI {player_id} for action_id '{action_id}'...")
+
+        try:
+            if action_type == "NIGHT_ACTION": # This assumes a generic night action type from ST LLM
+                # PlayerAgent.get_night_action needs alive_player_ids_with_names
+                alive_players_with_names = [
+                    {"id": pid, "name": self.grimoire.game_state.get("player_names", {}).get(pid, pid)}
+                    for pid in self.grimoire.get_alive_players()
+                ]
+                action_result = await agent.get_night_action(game_state_summary_for_agent, alive_players_with_names)
+            elif action_type == "NOMINATION_CHOICE":
+                alive_players_with_names = [
+                    {"id": pid, "name": self.grimoire.game_state.get("player_names", {}).get(pid, pid)}
+                    for pid in self.grimoire.get_alive_players() if pid != player_id # Can't nominate self
+                ]
+                # decide_nomination expects: game_state, alive_player_ids_with_names, previous_nominations
+                # previous_nominations might need to be passed in action_details by ST LLM or fetched from grimoire log
+                previous_noms_today = [log["data"] for log in self.grimoire.game_log if log["event_type"] == "NOMINATION" and log["data"].get("day") == self.grimoire.day_number]
+                chosen_nominee_id = await agent.decide_nomination(game_state_summary_for_agent, alive_players_with_names, previous_noms_today)
+                if chosen_nominee_id:
+                    action_result = {"action_type": "NOMINATE", "player_id": player_id, "nominated_player_id": chosen_nominee_id}
+                else:
+                    action_result = {"action_type": "PASS_NOMINATION", "player_id": player_id}
+            elif action_type == "VOTE_CHOICE":
+                nominee_id = action_details.get("nominee_id") # ST LLM must provide this in action_details
+                nominee_name = self.grimoire.game_state.get("player_names",{}).get(nominee_id, nominee_id)
+                if nominee_id:
+                    vote_decision = await agent.decide_vote(game_state_summary_for_agent, nominee_id, nominee_name)
+                    action_result = {"action_type": "CAST_VOTE", "player_id": player_id, "nominee_id": nominee_id, "vote": vote_decision}
+                else:
+                    print(f"VOTE_CHOICE requested for {player_id} but no nominee_id in action_details: {action_details}")
+                    action_result = {"action_type": "ERROR_VOTE_NO_NOMINEE"}            
+            # Add elif for CHAT_MESSAGE or other specific actions if ST LLM is to request them individually
+            # For PUBLIC_CHAT, the _process_ai_communication_round might still be used, or ST LLM can prompt individuals.
+            elif action_type == "COMMUNICATION_CHOICE": # For public/private chat decisions
+                action_result = await agent.decide_communication(game_state_summary_for_agent)
+            else:
+                print(f"AI Action Warning: Unknown action_type '{action_type}' requested for {player_id}")
+                action_result = {"action_type": "UNKNOWN_REQUEST", "original_request": action_type}
+
+        except Exception as e:
+            print(f"Error getting action {action_type} from AI {player_id}: {e}")
+            action_result = {"action_type": f"ERROR_IN_AGENT_ACTION", "details": str(e)}
+            import traceback
+            traceback.print_exc()
+
+        # Store the result in the pending_storyteller_actions structure
+        if action_id in self.pending_storyteller_actions:
+            if player_id in self.pending_storyteller_actions[action_id]["expected_players"]:
+                self.pending_storyteller_actions[action_id]["received_actions"][player_id] = action_result
+                print(f"AI action received from {player_id} for action_id '{action_id}': {action_result}")
+            else:
+                print(f"AI Action Warning: {player_id} responded for action_id '{action_id}', but was not in expected_players list: {self.pending_storyteller_actions[action_id]['expected_players']}")
+        else:
+            print(f"AI Action Warning: Received action for '{action_id}' from {player_id}, but this action_id is not pending.")
 
     async def execute_storyteller_command(self, command_obj: Dict[str, Any]):
         command_type = command_obj.get("command")
@@ -221,16 +300,13 @@ class GameManager:
                 print(f"UPDATE_PLAYER_STATUS Error: Missing grimoire or params: {params}")
 
         elif command_type == "UPDATE_GRIMOIRE_VALUE":
-            # This is a bit more complex as it involves nested updates. 
-            # For now, let's assume simple top-level key updates or direct attribute setting.
-            # A more robust solution would handle nested paths like ['game_state', 'demon_bluffs']
             if self.grimoire and "key_path" in params and "value" in params:
                 key_path = params["key_path"]
                 value = params["value"]
-                if len(key_path) == 1: #e.g., grimoire.current_phase = "value"
+                if len(key_path) == 1:
                     setattr(self.grimoire, key_path[0], value)
                     print(f"Set grimoire.{key_path[0]} = {value}")
-                elif len(key_path) > 1: #e.g. grimoire.game_state["some_key"] = value
+                elif len(key_path) > 1:
                     obj = self.grimoire
                     for key_segment in key_path[:-1]:
                         if hasattr(obj, key_segment):
@@ -240,9 +316,9 @@ class GameManager:
                         else:
                             print(f"UPDATE_GRIMOIRE_VALUE Error: Invalid path {key_path}")
                             return
-                    if hasattr(obj, key_path[-1]): # Set as attribute if possible
+                    if hasattr(obj, key_path[-1]):
                          setattr(obj, key_path[-1], value)
-                    elif isinstance(obj, dict): # Set as dict key if it's a dict
+                    elif isinstance(obj, dict):
                         obj[key_path[-1]] = value
                     else:
                         print(f"UPDATE_GRIMOIRE_VALUE Error: Cannot set value at path {key_path}")
@@ -252,39 +328,70 @@ class GameManager:
 
         elif command_type == "EXECUTE_PLAYER":
             if self.rule_enforcer and "player_id" in params and "reason" in params:
-                # The RuleEnforcer._execute_player method already handles logging and status updates.
                 self.rule_enforcer._execute_player(params["player_id"], params["reason"])
-                # Potentially broadcast this event here if not handled by LLM's next commands
                 await self.broadcast_game_event(f"Player {self.grimoire.game_state.get('player_names',{}).get(params['player_id'], params['player_id'])} has died due to: {params['reason']}")
             else:
                 print(f"EXECUTE_PLAYER Error: Missing rule_enforcer or params: {params}")
         
         elif command_type == "REQUEST_PLAYER_ACTION":
-            # This is complex: needs to store that an action is expected, and how to resume.
-            # For now, just log it. The game loop will need to handle this state.
             player_id = params.get("player_id")
+            action_id = params.get("action_id") # Crucial for tracking
             action_type = params.get("action_type")
-            print(f"STORYTELLER REQUESTS ACTION: Player {player_id} to perform {action_type} with details {params.get('action_details')}")
-            # This would typically involve setting up a future in self.human_player_expected_actions or a similar mechanism for AI agents
-            # and then the game loop would pause or await these actions before feeding results back to StorytellerLLM.
-            # For example, for night actions:
-            if player_id and action_type == "NIGHT_ACTION" and player_id in self.agents:
-                 # This is a conceptual link; _collect_ai_night_actions would need to be callable for a single agent
-                 # or this command triggers a flag that _collect_ai_night_actions respects.
-                 print(f"GameManager needs to prompt AI {player_id} for their night action based on ST LLM request.")
-                 # We can send a specific message to the player to trigger their UI or AI logic if they are human/external.
-                 await self.send_personal_message(player_id, "REQUEST_NIGHT_ACTION", params.get("action_details", {}))
-            elif player_id and action_type == "VOTE" and player_id in self.agents:
-                 await self.send_personal_message(player_id, "REQUEST_VOTE", params.get("action_details", {}))
-                 print(f"GameManager needs to prompt AI {player_id} for their vote based on ST LLM request.")
+            action_details = params.get("action_details", {})
+
+            if not all([player_id, action_id, action_type]):
+                print(f"REQUEST_PLAYER_ACTION Error: Missing player_id, action_id, or action_type in params: {params}")
+                return
+
+            print(f"Storyteller LLM requests action '{action_id}' of type '{action_type}' from player {player_id} with details: {action_details}")
+
+            if player_id in self.agents: # It's an AI player
+                # Create a task to get the AI's action. This will run in the background.
+                # The result will be stored in self.pending_storyteller_actions by the helper itself.
+                asyncio.create_task(self._get_ai_player_action(player_id, action_id, action_type, action_details))
+                print(f"Task created for AI {player_id} to decide action '{action_id}'.")
+            elif player_id in self.active_connections: # It's a human player (or at least connected client)
+                # For human players, we need to send them a message prompting for their action.
+                # Their response will come via `handle_incoming_message`.
+                # We still need to record that we are expecting this action_id from them.
+                if action_id not in self.pending_storyteller_actions:
+                     print(f"REQUEST_PLAYER_ACTION Warning: action_id {action_id} was not pre-declared by AWAIT_PLAYER_RESPONSES for human {player_id}. This might be okay if ST LLM requests then awaits immediately.")
+                     # It implies the ST LLM should issue AWAIT just after this for this player/action_id
+
+                # Send a tailored message type based on action_type
+                if action_type == "NIGHT_ACTION":
+                    await self.send_personal_message(player_id, "REQUEST_NIGHT_ACTION", {"action_id": action_id, **action_details})
+                elif action_type == "NOMINATION_CHOICE":
+                     await self.send_personal_message(player_id, "REQUEST_NOMINATION", {"action_id": action_id, **action_details})
+                elif action_type == "VOTE_CHOICE":
+                    await self.send_personal_message(player_id, "REQUEST_VOTE", {"action_id": action_id, **action_details})
+                elif action_type == "COMMUNICATION_CHOICE":
+                    await self.send_personal_message(player_id, "REQUEST_CHAT_DECISION", {"action_id": action_id, **action_details})
+                else:
+                    await self.send_personal_message(player_id, "REQUEST_GENERIC_ACTION", {"action_id": action_id, "action_type": action_type, **action_details})
+                print(f"Sent '{action_type}' prompt to human player {player_id} for action_id '{action_id}'.")
+            else:
+                print(f"REQUEST_PLAYER_ACTION Error: Player {player_id} not found in agents or active_connections.")
+                 # If ST LLM is awaiting this player, we should probably mark an error for them.
+                if action_id in self.pending_storyteller_actions and player_id in self.pending_storyteller_actions[action_id]["expected_players"]:
+                    self.pending_storyteller_actions[action_id]["received_actions"][player_id] = {"action_type": "ERROR_PLAYER_NOT_FOUND"}
 
         elif command_type == "AWAIT_PLAYER_RESPONSES":
-            # This command implies the GameManager should now pause its loop feeding commands to the ST LLM,
-            # and wait until all players listed in expected_players have submitted their actions for action_id.
-            # The game loop logic will need to be adapted to handle this pausing and resuming.
-            print(f"STORYTELLER AWAITING RESPONSES for action_id {params.get('action_id')} from {params.get('expected_players')}")
-            # Set a flag or state in GameManager that the main loop will check.
-            # self.waiting_for_actions = params # Or some more structured state object
+            action_id = params.get("action_id")
+            expected_players = params.get("expected_players", [])
+            if action_id and expected_players:
+                if action_id not in self.pending_storyteller_actions:
+                    self.pending_storyteller_actions[action_id] = {"expected_players": expected_players, "received_actions": {}}
+                else: # Merge expected players if action_id already exists (e.g. ST requests one by one then awaits all)
+                    existing_expected = set(self.pending_storyteller_actions[action_id]["expected_players"])
+                    new_expected = set(expected_players)
+                    self.pending_storyteller_actions[action_id]["expected_players"] = list(existing_expected.union(new_expected))
+                
+                print(f"Game Loop: Now awaiting responses for action_id '{action_id}' from {self.pending_storyteller_actions[action_id]['expected_players']}")
+                # The main game loop will see this action_id in pending_storyteller_actions and will continue to feed it to ST LLM
+                # until all expected_players have their actions in received_actions for this action_id.
+            else:
+                 print(f"Game Loop Warning: AWAIT_PLAYER_RESPONSES command missing action_id or expected_players.")
 
         elif command_type == "END_GAME":
             if "winner" in params and "reason" in params:
@@ -510,330 +617,125 @@ class GameManager:
         #this method can be used for on-connect refresh or other private updates
         await self.send_personal_message(player_id, "PRIVATE_INFO_UPDATE", private_payload)
 
-    async def _collect_ai_night_actions(self) -> Dict[str, Any]:
-        if not self.grimoire: return {}
-        actions = {}
-        game_state_summary = self._get_public_game_state_summary("Night action phase")
-        alive_player_ids = self.grimoire.get_alive_players()
-
-        action_tasks = {}
-        for agent_id, agent in self.agents.items():
-            if self.grimoire.is_player_alive(agent_id):
-                role_details = get_role_details(agent.role)
-                is_first_night = self.grimoire.current_phase == "FIRST_NIGHT"
-                needs_action = (is_first_night and role_details.get("first_night_ability")) or \
-                               (not is_first_night and role_details.get("other_night_ability"))
-                
-                #some abilities are passive info, PlayerAgent.get_night_action handles this
-                if needs_action:
-                    print(f"Requesting night action from AI {agent_id} ({agent.role})")
-                    action_tasks[agent_id] = asyncio.create_task(agent.get_night_action(game_state_summary, alive_player_ids))
-        
-        for agent_id, task in action_tasks.items():
-            try:
-                action = await asyncio.wait_for(task, timeout=30.0) #30s timeout for LLM
-                if action:
-                    actions[agent_id] = action
-                    print(f"Received night action from AI {agent_id}: {action}")
-                else:
-                    print(f"AI {agent_id} provided no night action.")
-            except asyncio.TimeoutError:
-                print(f"Timeout getting night action from AI {agent_id}")
-            except Exception as e:
-                print(f"Error getting night action from AI {agent_id}: {e}")
-        return actions
-
-    async def handle_incoming_message(self, player_id: str, message_str: str):
-        try:
-            message = json.loads(message_str)
-            if not isinstance(message, dict):
-                # Ensure message is a dictionary before trying to get 'type'
-                print(f"Player {player_id} sent non-dictionary JSON: {message_str}")
-                await self.send_personal_message(player_id, "ERROR", {"message": "Invalid message format: expected a JSON object."})
-                return
-            msg_type = message.get("type")
-        except json.JSONDecodeError:
-            print(f"Player {player_id} sent malformed JSON: {message_str}")
-            await self.send_personal_message(player_id, "ERROR", {"message": "Malformed JSON received."})
-            return
-        except Exception as e: # Catch any other unexpected error during initial parsing/type checking
-            print(f"Unexpected error parsing message from {player_id}. Data: '{message_str}'. ErrorType: {type(e)}, Error: {repr(e)}")
-            # Optionally send a generic error message back to the client
-            await self.send_personal_message(player_id, "ERROR", {"message": "Error processing your message."})
-            return
-
-        if msg_type == "REQUEST_GAME_START":
-            # Check if a game is already running and its loop is active
-            if self.grimoire and self.rule_enforcer and self.game_loop_task and not self.game_loop_task.done():
-                print("Game start requested, but a game is already running and its loop is active.")
-                await self.send_personal_message(player_id, "INFO", {"message": "A game is already in progress."})
-                return
-            # Additional check for lingering game state without an active loop
-            if self.grimoire and (not self.game_loop_task or self.game_loop_task.done()):
-                 print("Game start requested, but previous game resources might exist without a running loop. Attempting to clear and restart.")
-                 # setup_new_game should ideally handle resetting/clearing old state
-
-            print("Received REQUEST_GAME_START. Setting up 10-AI player game.")
-            await self.broadcast_game_event("Game start requested for 10 AI players...")
-            
-            # Define roles for a 10-player game
-            # Standard 10-player setup: 7 Townsfolk, 1 Outsider, 1 Minion, 1 Demon
-            roles_for_10_players = [
-                "Washerwoman", "Librarian", "Investigator", "Chef", "Empath", 
-                "Fortune Teller", "Undertaker", # Townsfolk (7)
-                "Monk",                         # Outsider (1)
-                "Poisoner",                     # Minion (1)
-                "Imp"                           # Demon (1)
-            ]
-            # Shuffle roles to make assignments random each game, or keep fixed for testing
-            # random.shuffle(roles_for_10_players) 
-
-            ai_player_ids_roles = {}
-            for i in range(10):
-                ai_player_id = f"AIPlayer{i+1}"
-                ai_player_ids_roles[ai_player_id] = roles_for_10_players[i]
-            
-            await self.setup_new_game(ai_player_ids_roles, human_player_ids=[]) # No human players
-            return
-
-        # For any message type other than REQUEST_GAME_START:
-        # If game essentials are not ready, inform client.
-        if not self.grimoire or not self.rule_enforcer:
-            await self.send_personal_message(player_id, "ERROR", {"message": "Game not active. Send REQUEST_GAME_START to begin."}) 
-            return
-
-        # Main game logic for messages during an active/initialized game, protected by lock
-        async with self._game_lock:
-            # Check if the game loop has started and the game is considered fully 'live'
-            if not self._game_started_event.is_set():
-                # This means setup_new_game might not have completed, its game loop isn't confirmed running,
-                # or the game has ended and the event was cleared.
-                message_to_send = "Game is not currently active, has ended, or is still initializing."
-                if player_id == "ObserverClient":
-                    message_to_send = "Game is not currently active, has ended, or is still initializing. Observer commands (other than start) ignored."
-                
-                print(f"Player {player_id} sent message type '{msg_type}' while game event not set. Sending: {message_to_send}")
-                await self.send_personal_message(player_id, "INFO", {"message": message_to_send})
-                return
-
-            # At this point: grimoire, rule_enforcer exist, AND _game_started_event IS SET.
-            # This implies the game is "live" and the game loop should be running or have run.
-
-            if player_id == "ObserverClient":
-                # Observer client sent a message (that isn't REQUEST_GAME_START) while the game is live.
-                # These messages are generally ignored, other than providing feedback.
-                print(f"ObserverClient sent non-start message (type: {msg_type}) during active game. Ignoring.")
-                await self.send_personal_message(
-                    player_id,
-                    "INFO",
-                    {"message": f"Received your message (type: {msg_type}). Game is active. Observer client actions are limited."}
-                )
-                return
-
-            # AI/Human player active game message handling would continue here
-            # This part needs to be reviewed based on how AI/Human player messages are to be handled
-            print(f"Player {player_id} (not Observer) sent unhandled message type '{msg_type}': {message_str}")
-            await self.send_personal_message(player_id, "INFO", {"message": f"Received unhandled message type: {msg_type}"})
-            # Removed processing for SEND_CHAT, NOMINATE, CAST_VOTE, NIGHT_ACTION from observer client
-            # These actions are now AI-driven or handled internally by game loop.
-            # Based on original logic, these were removed for observer. If actual players send these,
-            # they should be processed by their respective logic, which seems to be missing/commented out here.
-            # This section should be where human player actions are routed if this function handles them.
-            # The original comment implies these are AI-driven or internal, which means this part
-            # might only be for logging unhandled messages from non-observer, non-AI (if any) clients.
-
     async def run_game_loop(self):
-        print("Game loop waiting for game to be fully started...")
-        await self._game_started_event.wait() # Ensure setup_new_game has completed
-        print("Game loop starting active processing.")
+        print("Game loop waiting for game to be fully started (Storyteller LLM driven)...")
+        await self._game_started_event.wait()
+        print("Game loop starting active processing (Storyteller LLM driven).")
 
-        if not self.grimoire or not self.rule_enforcer:
-            print("Game loop exiting: Grimoire or RuleEnforcer not initialized.")
+        if not self.grimoire:
+            print("Game loop exiting: Grimoire not initialized by Storyteller LLM.")
             return
+        
+        self.pending_storyteller_actions: Dict[str, Dict[str, Any]] = {}
 
         try:
-            while self.grimoire is not None: # Loop as long as game is active
-                async with self._game_lock:
-                    current_phase = self.grimoire.current_phase
-                    print(f"Game Loop Tick. Current phase: {current_phase}, Day: {self.grimoire.day_number}")
-                    game_state_summary = self._get_public_game_state_summary(f"Start of {current_phase}")
-                    alive_player_ids = self.grimoire.get_alive_players()
+            loop_iteration = 0
+            while self.grimoire is not None and loop_iteration < 500:
+                loop_iteration += 1
+                print(f"--- Game Loop Iteration: {loop_iteration} ---")
+                # allow AI players to chat during day phase
+                if self.grimoire.current_phase == "DAY_CHAT":
+                    game_state_summary = self._get_public_game_state_summary("AI communication round")
+                    await self._process_ai_communication_round(game_state_summary)
+                current_context_lines = []
+                current_context_lines.append(f"EVENT: Start of game loop iteration {loop_iteration}.")
+                current_context_lines.append(f"GRIMOIRE_PHASE: {self.grimoire.current_phase}")
+                current_context_lines.append(f"GRIMOIRE_DAY: {self.grimoire.day_number}")
+                grimoire_summary = {
+                    "players": self.grimoire.players,
+                    "roles": self.grimoire.roles,
+                    "alignments": self.grimoire.alignments,
+                    "statuses": self.grimoire.statuses,
+                    "current_phase": self.grimoire.current_phase,
+                    "day_number": self.grimoire.day_number,
+                    "game_log_tail": self.grimoire.game_log[-5:]
+                }
+                current_context_lines.append(f"GRIMOIRE_SNAPSHOT: {json.dumps(grimoire_summary)}")
+                if self._daily_chat_log:
+                    current_context_lines.append(f"RECENT_PUBLIC_CHAT_LOG: {json.dumps(self._daily_chat_log[-10:])}")
                 
-                if current_phase == "FIRST_NIGHT" or current_phase == "NIGHT":
-                    await self.broadcast_game_state(f"Night {self.grimoire.day_number} begins.")
-                    #collect actions (AI + Human)
-                    night_actions: Dict[str, Any] = {}
-                    human_night_action_futures: Dict[str, asyncio.Future] = {}
+                # Consolidate ALL submitted player actions for the ST LLM context
+                # This will now also include actions submitted by humans via handle_incoming_message
+                all_submitted_actions_for_st_llm = {}
+                if self.pending_storyteller_actions:
+                    for action_id, details in self.pending_storyteller_actions.items():
+                        if details["received_actions"]:
+                            all_submitted_actions_for_st_llm[action_id] = details["received_actions"]
+                
+                if all_submitted_actions_for_st_llm:
+                    current_context_lines.append(f"PLAYER_ACTIONS_COLLECTED_SO_FAR: {json.dumps(all_submitted_actions_for_st_llm)}")
+                
+                # Also explicitly state what is still pending, so LLM knows what it's waiting for vs what it received.
+                if self.pending_storyteller_actions:
+                     current_context_lines.append(f"PENDING_STORYTELLER_ACTIONS_OVERVIEW: {json.dumps({aid: list(data['received_actions'].keys()) for aid, data in self.pending_storyteller_actions.items()}) }")
 
-                    #AI actions
-                    ai_actions = await self._collect_ai_night_actions()
-                    night_actions.update(ai_actions)
+                print(f"Requesting commands from Storyteller LLM... Current Phase: {self.grimoire.current_phase}, Day: {self.grimoire.day_number}")
+                storyteller_commands = await self.storyteller_agent.generate_commands(current_context_lines)
+                print(f"Received {len(storyteller_commands)} commands from Storyteller LLM: {storyteller_commands}")
 
-                    #human actions
-                    for p_id in alive_player_ids:
-                        if p_id not in self.agents: #it's a human
-                            role_details = get_role_details(self.grimoire.get_player_role(p_id))
-                            needs_action = (current_phase == "FIRST_NIGHT" and role_details.get("first_night_ability")) or \
-                                           (current_phase == "NIGHT" and role_details.get("other_night_ability"))
-                            #further filter if role actually requires a choice (e.g. not Washerwoman passive info)
-                            #this logic is partly in PlayerAgent, replicate for human prompts
-                            if needs_action and not (role_details.get("name") in ["Washerwoman", "Librarian", "Investigator", "Chef", "Empath"] and current_phase == "FIRST_NIGHT"): #todo: refine this check
-                                fut = asyncio.Future()
-                                self.human_player_expected_actions[p_id] = fut
-                                human_night_action_futures[p_id] = fut
-                                await self.send_personal_message(p_id, "REQUEST_NIGHT_ACTION", {"role": role_details.get("name"), "description": role_details.get("description")})
-                   
-                    for p_id, fut in human_night_action_futures.items():
-                        try:
-                            action = await asyncio.wait_for(fut, timeout=60.0) #1 min for human night action
-                            night_actions[p_id] = action
-                            print(f"Received night action from Human {p_id}: {action}")
-                        except asyncio.TimeoutError:
-                            print(f"Timeout for human night action from {p_id}")
-                            #todo: storyteller might make a default action or warn player
-                        except asyncio.CancelledError:
-                            print(f"Night action future for human {p_id} was cancelled.")
-                        finally:
-                            if p_id in self.human_player_expected_actions: del self.human_player_expected_actions[p_id]
+                should_await_player_responses_this_cycle = False
+                active_await_action_ids = set() # Track action_ids we are actively awaiting this cycle
 
-                    async with self._game_lock:
-                        await self.rule_enforcer.resolve_night_actions(night_actions)
-                        self.rule_enforcer.transition_to_day()
-                    await self.broadcast_game_state(f"Day {self.grimoire.day_number} begins.")
-                    self._daily_chat_log = [] #clear log for new day
-
-                elif current_phase == "DAY_CHAT":
-                    if not self._nomination_order:
-                        self._nomination_order = list(self.grimoire.get_alive_players()) #simple order for now
-                        random.shuffle(self._nomination_order)
-                        self._current_nominating_player_index = 0
+                for command_obj in storyteller_commands:
+                    await self.execute_storyteller_command(command_obj)
+                    if command_obj.get("command") == "AWAIT_PLAYER_RESPONSES":
+                        should_await_player_responses_this_cycle = True
+                        action_id = command_obj["params"].get("action_id")
+                        if action_id: active_await_action_ids.add(action_id)
                     
-                    # New AI Communication Round
-                    # This allows AIs to chat (publicly or privately) before nominations perhaps
-                    await self.broadcast_game_event("Day phase: General discussion period begins.")
-                    # Pass a summary of game state suitable for AI decision making
-                    # Ensure game_state_summary contains 'all_players_details' and 'daily_chat_log' as expected by agents
-                    ai_context_game_state = {
-                         **self._get_public_game_state_summary("AI Communication Round"),
-                         "daily_chat_log": list(self._daily_chat_log), # pass current log
-                         "all_players_details": [
-                            {"id": p_id, 
-                             "name": self.grimoire.game_state.get("player_names", {}).get(p_id, p_id),
-                             "is_alive": self.grimoire.is_player_alive(p_id)} 
-                            for p_id in self.grimoire.players
-                         ]
-                    }
-                    await self._process_ai_communication_round(ai_context_game_state)
-                    await asyncio.sleep(2) # Give some time for observer to read chats
+                    if command_obj.get("command") == "END_GAME":
+                        print("Game loop ending due to END_GAME command from Storyteller.")
+                        return
+                
+                if not self.grimoire:
+                    print("Game loop ending as Grimoire is None.")
+                    break
 
-                    # Nomination turn management (simplified)
-                    if self._nomination_order and self._current_nominating_player_index < len(self._nomination_order):
-                        current_nominator_id = self._nomination_order[self._current_nominating_player_index]
-                        if not self.grimoire.is_player_alive(current_nominator_id) or not self.grimoire.get_player_status(current_nominator_id, "can_nominate"):
-                            self._current_nominating_player_index += 1 #skip dead or unable nominator
-                            continue
-
-                        await self.broadcast_message("NOMINATION_TURN", {"player_id": current_nominator_id, "player_name": self.grimoire.game_state.get("player_names",{}).get(current_nominator_id, current_nominator_id)})
-                        print(f"It is {current_nominator_id}'s turn to nominate.")
-                        #if AI, trigger nomination. If human, wait for NOMINATE message handled by handle_incoming_message
-                        if current_nominator_id in self.agents:
-                            # ai nomination: let agent choose a nominee
-                            alive_with_names = [
-                                {"id": pid, "name": self.grimoire.game_state.get("player_names", {}).get(pid, pid)}
-                                for pid in self.grimoire.get_alive_players()
-                            ]
-                            chosen_nominee = await self.agents[current_nominator_id].decide_nomination(
-                                game_state_summary, alive_with_names, []
-                            )
-                            if chosen_nominee:
-                                self.rule_enforcer.process_nomination(current_nominator_id, chosen_nominee)
-                                await self.broadcast_game_state(
-                                    f"AI {current_nominator_id} nominated {chosen_nominee}."
-                                )
+                # After executing ST LLM commands, check if we need to pause for player inputs
+                if should_await_player_responses_this_cycle:
+                    print(f"Game Loop: Pausing to collect player responses for action_ids: {active_await_action_ids} as per Storyteller LLM directive.")
+                    # The actual collection for AIs is triggered by REQUEST_PLAYER_ACTION creating tasks.
+                    # For humans, REQUEST_PLAYER_ACTION sends them a message.
+                    # We now need to wait until expected actions are filled or a timeout occurs.
+                    # This loop iteration will end, and the next one will provide the updated pending_storyteller_actions to the ST LLM.
+                    
+                    # Check if all expected actions for *any* of the active_await_action_ids are complete
+                    all_awaited_actions_complete = True
+                    for action_id in list(active_await_action_ids): # Iterate over a copy if we modify dict
+                        if action_id in self.pending_storyteller_actions:
+                            pending_action_details = self.pending_storyteller_actions[action_id]
+                            expected = set(pending_action_details["expected_players"])
+                            received = set(pending_action_details["received_actions"].keys())
+                            if not expected.issubset(received):
+                                all_awaited_actions_complete = False
+                                print(f"Still waiting for actions from {list(expected - received)} for action_id '{action_id}'.")
+                                break # No need to check other action_ids if one is still pending
                             else:
-                                # no nomination from this agent, move to next
-                                self._current_nominating_player_index +=1
-                                continue
-                            # after nomination, proceed to voting phase in next loop
-                            continue
-                        else: #human nominator, handled by handle_incoming_message which will call rule_enforcer
-                            #the game loop effectively pauses here for this human action until message arrives or timeout
-                            await asyncio.sleep(30) #simple wait, real solution needs futures from handle_incoming_message
-                            pass #waiting for human via websocket
+                                print(f"All actions for action_id '{action_id}' have been received.")
+                                # OPTIONAL: ST LLM could explicitly command to clear a pending action once resolved.
+                                # If not, it will keep seeing it in context. For now, leave it for ST LLM to manage.
+                                # For example, ST LLM might say: LOG_EVENT (action X resolved), then doesn't AWAIT X again.
+                        else:
+                            print(f"Warning: Game loop was awaiting action_id '{action_id}' but it's no longer in pending_storyteller_actions.")
+                    
+                    if not all_awaited_actions_complete:
+                        await asyncio.sleep(1) # Wait before re-querying ST LLM if still waiting for players
+                        continue # Go to next loop iteration to provide updated context (with any newly collected actions)
                     else:
-                        #all nominations done or no one can nominate -> go to voting if a nominee exists, or night
-                        print("Nomination round potentially finished or no one to nominate.")
-                        async with self._game_lock:
-                            if "current_nominee_id" not in self.grimoire.game_state:
-                                #no successful nomination, end of day essentially
-                                self.grimoire.log_event("DAY_END_NO_NOMINATION", {})
-                                self.rule_enforcer.transition_to_night()
-                        await self.broadcast_game_state("No successful nomination. Transitioning to night.")
-
-                elif current_phase == "VOTING":
-                    nominee_id = self.grimoire.game_state.get("current_nominee_id")
-                    if not nominee_id: self.rule_enforcer.transition_to_day(); continue #should not happen
-
-                    await self.broadcast_message("VOTE_START", {"nominee_id": nominee_id, "nominee_name": self.grimoire.game_state.get("player_names",{}).get(nominee_id, nominee_id)})
-                    
-                    votes: Dict[str, bool] = {}
-                    human_vote_futures: Dict[str, asyncio.Future] = {}
-
-                    #collect AI votes
-                    for agent_id, agent in self.agents.items():
-                        if self.grimoire.is_player_alive(agent_id):
-                            #todo: check Butler condition for AI
-                            vote_decision = await agent.decide_vote(game_state_summary, nominee_id)
-                            if vote_decision is not None: votes[agent_id] = vote_decision
-                    
-                    #collect Human votes
-                    for p_id in alive_player_ids:
-                        if p_id not in self.agents: #human
-                            #todo: check Butler condition
-                            fut = asyncio.Future()
-                            self.human_player_expected_actions[p_id] = fut
-                            human_vote_futures[p_id] = fut
-                            await self.send_personal_message(p_id, "REQUEST_VOTE", {"nominee_id": nominee_id})
-
-                    for p_id, fut in human_vote_futures.items():
-                        try:
-                            action_payload = await asyncio.wait_for(fut, timeout=30.0) #30s for human vote
-                            if action_payload and "vote" in action_payload:
-                                votes[p_id] = action_payload["vote"]
-                        except asyncio.TimeoutError:
-                            print(f"Timeout for human vote from {p_id}. Defaulting to NO.")
-                            votes[p_id] = False #default vote on timeout
-                        except asyncio.CancelledError:
-                            print(f"Vote future for human {p_id} was cancelled.")
-                        finally:
-                             if p_id in self.human_player_expected_actions: del self.human_player_expected_actions[p_id]
-                   
-                    async with self._game_lock:
-                        self.rule_enforcer.process_votes(votes)
-                    await self.broadcast_game_state(f"Voting on {nominee_id} complete. New phase: {self.grimoire.current_phase}")
-                    self._nomination_order = [] #reset for next day or if nominations reopen
-                    self._current_nominating_player_index = 0
-
-                #check victory conditions after each major state change (esp. after votes/night actions)
-                async with self._game_lock:
-                    game_over, winner = self.rule_enforcer.check_victory_conditions()
+                        print("All actively awaited player responses received for this cycle. Proceeding to next ST LLM query without forced delay.")
                 
-                if game_over:
-                    print(f"Game Over! Winner: {winner}")
-                    await self.broadcast_message("GAME_END", {"winner": winner, "reason": "Victory condition met"})
-                    self.grimoire = None #stop game by clearing grimoire
-                    self._game_started_event.clear()
-                    break #exit game loop
+                await asyncio.sleep(0.1) # Short pause if not awaiting
 
-                await asyncio.sleep(1) #short pause to prevent tight loop if phases change rapidly
         except asyncio.CancelledError:
             print("Game loop was cancelled.")
         except Exception as e:
             print(f"Critical error in game loop: {e}")
-            # Potentially try to gracefully end the game or notify players
+            import traceback
+            traceback.print_exc()
         finally:
             self._game_started_event.clear()
             print("Game loop ended.")
+            self.pending_storyteller_actions = {}
 
     async def broadcast_player_roles(self, roles_info: List[Dict[str, str]]):
         """Broadcasts all player roles to all connected clients (for observer mode)."""
@@ -925,6 +827,44 @@ class GameManager:
             elif comm_type == "SILENT":
                 print(f"AI {sender_name} ({agent_id}) chose to remain silent.")
             # else: AI returned an unexpected communication type or was None
+
+    async def handle_incoming_message(self, player_id: str, raw_data: str):
+        try:
+            msg = json.loads(raw_data)
+        except json.JSONDecodeError:
+            print(f"failed to decode message from {player_id}: {raw_data}")
+            return
+
+        msg_type = msg.get("type")
+        payload = msg.get("payload")
+
+        if msg_type == "REQUEST_GAME_START":
+            # start a default 10-AI player game with random roles
+            default_player_ids = [f"AI_Player_{i}" for i in range(1, 11)]
+            # assign random roles to AI players
+            available_roles = list(ROLES_DATA.keys())
+            random.shuffle(available_roles)
+            # take as many roles as players
+            selected_roles = available_roles[:len(default_player_ids)]
+            player_ids_roles = {pid: selected_roles[i] for i, pid in enumerate(default_player_ids)}
+            await self.setup_new_game(player_ids_roles, human_player_ids=[])
+
+        elif msg_type == "CHAT_MESSAGE":
+            # record and broadcast public chat from human
+            text = payload.get("text") if isinstance(payload, dict) else payload
+            chat_event = {"sender": player_id, "sender_name": self.grimoire.game_state.get("player_names", {}).get(player_id, player_id), "text": text, "timestamp": "#timestamp#"}
+            self._daily_chat_log.append(chat_event)
+            await self.broadcast_message("CHAT_MESSAGE", chat_event)
+
+        elif msg_type in ("REQUEST_NIGHT_ACTION_RESPONSE", "REQUEST_NOMINATION", "REQUEST_VOTE", "REQUEST_CHAT_DECISION", "REQUEST_GENERIC_ACTION"):
+            # human response to Storyteller action prompt
+            action_id = payload.get("action_id") if isinstance(payload, dict) else None
+            if action_id and action_id in self.pending_storyteller_actions:
+                self.pending_storyteller_actions[action_id]["received_actions"][player_id] = payload
+                print(f"received human action for {player_id}, action_id {action_id}: {payload}")
+
+        else:
+            print(f"unknown message type from {player_id}: {msg_type}")
 
 game_manager = GameManager()
 #get player names for logging etc.

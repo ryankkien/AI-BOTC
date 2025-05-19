@@ -1,9 +1,11 @@
 import os
 import json
 import google.generativeai as genai
+from typing import Any
 
 class StorytellerAgent:
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, game_manager: Any = None):
+        self.game_manager = game_manager
         # configure the LLM for narrative duties
         effective_api_key = api_key or os.getenv("GOOGLE_API_KEY")
         if effective_api_key:
@@ -28,8 +30,8 @@ AVAILABLE COMMANDS:
 - {"command": "UPDATE_PLAYER_STATUS", "params": {"player_id": "string", "status_key": "string", "value": any}}
 - {"command": "UPDATE_GRIMOIRE_VALUE", "params": {"key_path": ["path", "to", "value"], "value": any}}
 - {"command": "EXECUTE_PLAYER", "params": {"player_id": "string", "reason": "string"}} # Handled by GameManager, logs death, updates status
-- {"command": "REQUEST_PLAYER_ACTION", "params": {"player_id": "string", "action_type": "string", "action_details": {object}}} # e.g., for night choices, votes
-- {"command": "AWAIT_PLAYER_RESPONSES", "params": {"action_id": "string", "expected_players": ["player_id1", "player_id2"]}} # Pauses for player inputs
+- {"command": "REQUEST_PLAYER_ACTION", "params": {"action_id": "string_unique_id_for_this_request", "player_id": "string", "action_type": "string_e.g_NIGHT_CHOICE_FORTUNE_TELLER_or_VOTE_ON_NOMINEE", "action_details": {object_context_for_player_e.g_nominee_info_or_list_of_targets}}}
+- {"command": "AWAIT_PLAYER_RESPONSES", "params": {"action_id": "string_unique_id_matching_REQUEST_PLAYER_ACTION", "expected_players": ["player_id1", "player_id2"]}} # Pauses for player inputs for the given action_id
 - {"command": "END_GAME", "params": {"winner": "string", "reason": "string"}}
 
 CORE RULES TO FOLLOW (summarized from your full instructions):
@@ -105,13 +107,17 @@ GENERAL GUIDELINES
             return []
 
 
-        prompt = self.system_prompt + "\\n\\nCURRENT CONTEXT:\\n"
-        prompt += "\\n".join(context_lines)
-        prompt += "\\n\\nStoryteller, provide your JSON list of commands based on the above context and your rules:"
+        prompt = self.system_prompt + "\n\nCURRENT CONTEXT:\n"
+        prompt += "\n".join(context_lines)
+        prompt += "\n\nStoryteller, provide your JSON list of commands based on the above context and your rules:"
+
+        if self.game_manager:
+            await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "prompt": prompt})
 
         try:
-            # print(f"--- STORYTELLER PROMPT START ---\\n{prompt}\\n--- STORYTELLER PROMPT END ---") # For debugging
             response = await self.llm.generate_content_async(prompt)
+            if self.game_manager:
+                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "response": response.text})
             raw_response_text = response.text.strip()
             # print(f"--- STORYTELLER RAW RESPONSE START ---\\n{raw_response_text}\\n--- STORYTELLER RAW RESPONSE END ---") # For debugging
             

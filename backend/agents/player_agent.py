@@ -105,7 +105,7 @@ class PlayerAgent(BaseAgent):
         return prompt
 
     async def _rate_limited_generate(self, *args, **kwargs):
-        #throttle llm calls to respect rate limits
+        # throttle llm calls to respect rate limits
         # default interval set to 6 seconds for 10 RPM limit (60 sec / 10 requests)
         min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
         now = time.monotonic()
@@ -114,8 +114,23 @@ class PlayerAgent(BaseAgent):
             elapsed = now - last_time
             if elapsed < min_interval:
                 await asyncio.sleep(min_interval - elapsed)
+        # extract prompt for debugging
+        prompt_text = args[0] if args else ""
+        # broadcast prompt to observer
+        try:
+            if self.game_manager:
+                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "prompt": prompt_text})
+        except Exception:
+            pass
+        # call the LLM
         response = await self.llm.generate_content_async(*args, **kwargs)
         self._last_llm_call_time = time.monotonic()
+        # broadcast response for debugging
+        try:
+            if self.game_manager:
+                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "response": response.text})
+        except Exception:
+            pass
         return response
 
     async def get_night_action(self, game_state: Dict[str, Any], alive_player_ids_with_names: List[Dict[str,str]]) -> Optional[Dict[str, Any]]:

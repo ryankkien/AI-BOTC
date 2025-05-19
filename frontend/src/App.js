@@ -5,6 +5,7 @@ import TownSquare from './components/TownSquare';
 import ChatPanel from './components/ChatPanel';
 import Controls from './components/Controls';
 import PrivateInfoPanel from './components/PrivateInfoPanel';
+import LLMDebugPanel from './components/LLMDebugPanel';
 
 //typically the backend URL would be in an env variable
 const SOCKET_URL = "ws://localhost:8000/ws"; //assumes FastAPI WebSocket is at /ws, adjust if using python-socketio which has its own path
@@ -16,6 +17,14 @@ function App() {
   const [gameState, setGameState] = useState({}); // { currentPhase, dayNumber, ... }
   const [privateInfo, setPrivateInfo] = useState({}); // { role, clues, ... }
   const [humanPlayerId, setHumanPlayerId] = useState("HumanPlayer1"); //example, this might be assigned by server
+  const [playerLLMDebug, setPlayerLLMDebug] = useState({});
+  const [storytellerLLMDebug, setStorytellerLLMDebug] = useState({ prompts: [], responses: [] });
+  const [selectedPlayerId, setSelectedPlayerId] = useState(null);
+  const [showStorytellerDebug, setShowStorytellerDebug] = useState(false);
+
+  const handlePlayerSelect = (playerId) => {
+    setSelectedPlayerId(playerId);
+  };
 
   useEffect(() => {
     //attempt to connect to the native WebSocket endpoint from FastAPI
@@ -34,6 +43,26 @@ function App() {
         const data = JSON.parse(event.data);
         //handle different types of messages from the server
         switch (data.type) {
+          case 'LLM_DEBUG':
+            const { agent, prompt, response } = data.payload;
+            if (agent === 'storyteller') {
+              setStorytellerLLMDebug(prev => ({
+                prompts: prompt ? [...prev.prompts, prompt] : prev.prompts,
+                responses: response ? [...prev.responses, response] : prev.responses
+              }));
+            } else {
+              setPlayerLLMDebug(prev => {
+                const entry = prev[agent] || { prompts: [], responses: [] };
+                return {
+                  ...prev,
+                  [agent]: {
+                    prompts: prompt ? [...entry.prompts, prompt] : entry.prompts,
+                    responses: response ? [...entry.responses, response] : entry.responses
+                  }
+                };
+              });
+            }
+            break;
           case 'CHAT_MESSAGE':
             setMessages(prevMessages => [...prevMessages, data.payload]);
             break;
@@ -118,7 +147,7 @@ function App() {
       </header>
       <div className="game-layout">
         <div className="main-game-area">
-          <TownSquare players={players} onPlayerClick={handleNominate} />
+          <TownSquare players={players} onPlayerClick={handlePlayerSelect} />
           <ChatPanel messages={messages} onSendMessage={sendMessage} />
         </div>
         <div className="side-panel">
@@ -133,6 +162,23 @@ function App() {
           />
           <div>Game Phase: {gameState.currentPhase || "Loading..."}</div>
           <div>Day: {gameState.dayNumber || 0}</div>
+          <button onClick={() => setShowStorytellerDebug(prev => !prev)} style={{ margin: '5px', padding: '5px' }}>
+            {showStorytellerDebug ? 'Hide' : 'View'} Storyteller LLM Debug
+          </button>
+          {showStorytellerDebug && (
+            <LLMDebugPanel
+              title="Storyteller LLM Debug"
+              debugData={storytellerLLMDebug}
+              onClose={() => setShowStorytellerDebug(false)}
+            />
+          )}
+          {selectedPlayerId && (
+            <LLMDebugPanel
+              title={`Player ${selectedPlayerId} LLM Debug`}
+              debugData={playerLLMDebug[selectedPlayerId] || { prompts: [], responses: [] }}
+              onClose={() => setSelectedPlayerId(null)}
+            />
+          )}
         </div>
       </div>
       {/* Observer mode panel could be conditionally rendered here */}
