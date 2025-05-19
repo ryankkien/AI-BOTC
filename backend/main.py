@@ -26,12 +26,18 @@ html = """
             .container { display: flex; flex: 1; overflow: hidden; }
             .main-content { flex: 3; display: flex; flex-direction: column; padding: 10px; overflow-y: auto; border-right: 1px solid #ccc; }
             .sidebar { flex: 1; padding: 10px; overflow-y: auto; border-left: 1px solid #ccc; display: flex; flex-direction: column;}
-            #messages, #storytellerLog { list-style-type: none; padding: 0; margin-bottom: 20px; flex-grow: 1; overflow-y: auto; border: 1px solid #eee; padding: 5px;}
+            /* make logs and chat panels resizable and preserve newlines */
+            #messages, #storytellerLog { list-style-type: none; padding: 5px; margin: 0; flex-grow: 1; overflow-y: auto; border: 1px solid #eee; resize: vertical; white-space: pre-wrap; }
             #playerRoles { list-style-type: none; padding: 0; }
-            .message-item, .log-item, .role-item { margin-bottom: 5px; padding: 8px; border-radius: 4px; }
+            /* ensure each log entry preserves whitespace and wraps */
+            .message-item, .log-item, .role-item { margin-bottom: 5px; padding: 8px; border-radius: 4px; white-space: pre-wrap; }
             .chat-message { background-color: #e1f5fe; }
             .game-event { background-color: #fff9c4; }
             .error-message { background-color: #ffcdd2; color: #c62828; }
+            /* collapsible panels */
+            details { display: flex; flex-direction: column; flex-grow: 1; overflow: hidden; margin-bottom: 10px; }
+            details > summary { cursor: pointer; padding: 4px; font-weight: bold; background-color: #eee; }
+            details > ul { margin: 0; flex-grow: 1; overflow-y: auto; }
             .info-message { background-color: #c8e6c9; }
             .storyteller-message { background-color: #d1c4e9; } /* Storyteller messages color */
             .connection-bar { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; }
@@ -46,10 +52,14 @@ html = """
         </div>
         <div class="container">
             <div class="main-content">
-                <h2>Storyteller Log & Game Events</h2>
-                <ul id="storytellerLog"></ul>
-                <h2>AI Player Chat</h2>
-                <ul id="messages"></ul>
+                <details open>
+                  <summary>Storyteller Log & Game Events</summary>
+                  <ul id="storytellerLog"></ul>
+                </details>
+                <details open>
+                  <summary>AI Player Chat</summary>
+                  <ul id="messages"></ul>
+                </details>
             </div>
             <div class="sidebar">
                 <h2>Player Roles</h2>
