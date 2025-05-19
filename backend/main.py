@@ -74,11 +74,20 @@ html = """
             const playerRolesList = document.getElementById('playerRoles');
 
             function addMessageToList(listElement, text, type) {
-                var item = document.createElement('li');
-                item.className = 'message-item ' + type;
-                item.textContent = text;
-                listElement.appendChild(item);
-                listElement.scrollTop = listElement.scrollHeight; // Scroll to bottom
+                var li = document.createElement('li');
+                li.className = 'message-item ' + type;
+                var details = document.createElement('details');
+                var summary = document.createElement('summary');
+                var firstLine = text.split('\\n')[0];
+                summary.textContent = firstLine;
+                details.appendChild(summary);
+                var pre = document.createElement('pre');
+                pre.style.whiteSpace = 'pre-wrap';
+                pre.textContent = text;
+                details.appendChild(pre);
+                li.appendChild(details);
+                listElement.appendChild(li);
+                listElement.scrollTop = listElement.scrollHeight;
             }
 
             function connectWs() {

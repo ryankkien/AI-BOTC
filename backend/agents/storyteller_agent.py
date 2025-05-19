@@ -2,10 +2,13 @@ import os
 import json
 import google.generativeai as genai
 from typing import Any
+import time
+import asyncio
 
 class StorytellerAgent:
     def __init__(self, api_key: str = None, game_manager: Any = None):
         self.game_manager = game_manager
+        self._last_llm_call_time = None  # initialize last call timestamp
         # configure the LLM for narrative duties
         effective_api_key = api_key or os.getenv("GOOGLE_API_KEY")
         if effective_api_key:
@@ -114,8 +117,18 @@ GENERAL GUIDELINES
         if self.game_manager:
             await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "prompt": prompt})
 
+        # throttle LLM calls to respect free-tier rate limits (10 RPM => 6s interval)
+        min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
+        now = time.monotonic()
+        if self._last_llm_call_time is not None:
+            elapsed = now - self._last_llm_call_time
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+
         try:
             response = await self.llm.generate_content_async(prompt)
+            # record timestamp after LLM call
+            self._last_llm_call_time = time.monotonic()
             if self.game_manager:
                 await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "response": response.text})
             raw_response_text = response.text.strip()
