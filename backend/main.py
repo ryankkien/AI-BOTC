@@ -13,6 +13,7 @@ from .storyteller.rules import RuleEnforcer
 from .storyteller.roles import ROLES_DATA, RoleAlignment, RoleType, get_role_details #import all necessary items
 from .agents.player_agent import PlayerAgent
 from .agents.base_agent import BaseAgent #if we need to type hint with base class
+from .agents.storyteller_agent import StorytellerAgent
 
 #temp html for testing - can be removed later or served from frontend proper
 html = """
@@ -179,19 +180,140 @@ class GameManager:
         self._current_nominating_player_index: int = 0
         self._nomination_order: List[str] = []
         self._daily_chat_log: List[Dict[str,str]] = [] #to feed to agents for day decisions
+        # initialize LLM-based storyteller
+        self.storyteller_agent = StorytellerAgent(api_key=self.google_api_key)
 
     def is_game_running(self) -> bool:
         return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set() #game is running if setup and loop started
+
+    async def execute_storyteller_command(self, command_obj: Dict[str, Any]):
+        command_type = command_obj.get("command")
+        params = command_obj.get("params", {})
+
+        if not command_type:
+            print(f"Storyteller Command Error: Missing 'command' field in {command_obj}")
+            return
+
+        print(f"GameManager executing Storyteller command: {command_type} with params: {params}")
+
+        if command_type == "LOG_EVENT":
+            if self.grimoire and "event_type" in params and "data" in params:
+                self.grimoire.log_event(params["event_type"], params["data"])
+            else:
+                print(f"LOG_EVENT Error: Missing grimoire, event_type, or data in params: {params}")
+
+        elif command_type == "BROADCAST_MESSAGE":
+            if "message_type" in params and "payload" in params:
+                await self.broadcast_message(params["message_type"], params["payload"])
+            else:
+                print(f"BROADCAST_MESSAGE Error: Missing message_type or payload in params: {params}")
+
+        elif command_type == "SEND_PERSONAL_MESSAGE":
+            if "player_id" in params and "message_type" in params and "payload" in params:
+                await self.send_personal_message(params["player_id"], params["message_type"], params["payload"])
+            else:
+                print(f"SEND_PERSONAL_MESSAGE Error: Missing player_id, message_type, or payload: {params}")
+
+        elif command_type == "UPDATE_PLAYER_STATUS":
+            if self.grimoire and "player_id" in params and "status_key" in params and "value" in params:
+                self.grimoire.update_status(params["player_id"], params["status_key"], params["value"])
+            else:
+                print(f"UPDATE_PLAYER_STATUS Error: Missing grimoire or params: {params}")
+
+        elif command_type == "UPDATE_GRIMOIRE_VALUE":
+            # This is a bit more complex as it involves nested updates. 
+            # For now, let's assume simple top-level key updates or direct attribute setting.
+            # A more robust solution would handle nested paths like ['game_state', 'demon_bluffs']
+            if self.grimoire and "key_path" in params and "value" in params:
+                key_path = params["key_path"]
+                value = params["value"]
+                if len(key_path) == 1: #e.g., grimoire.current_phase = "value"
+                    setattr(self.grimoire, key_path[0], value)
+                    print(f"Set grimoire.{key_path[0]} = {value}")
+                elif len(key_path) > 1: #e.g. grimoire.game_state["some_key"] = value
+                    obj = self.grimoire
+                    for key_segment in key_path[:-1]:
+                        if hasattr(obj, key_segment):
+                            obj = getattr(obj, key_segment)
+                        elif isinstance(obj, dict) and key_segment in obj:
+                            obj = obj[key_segment]
+                        else:
+                            print(f"UPDATE_GRIMOIRE_VALUE Error: Invalid path {key_path}")
+                            return
+                    if hasattr(obj, key_path[-1]): # Set as attribute if possible
+                         setattr(obj, key_path[-1], value)
+                    elif isinstance(obj, dict): # Set as dict key if it's a dict
+                        obj[key_path[-1]] = value
+                    else:
+                        print(f"UPDATE_GRIMOIRE_VALUE Error: Cannot set value at path {key_path}")
+                    print(f"Set grimoire path {key_path} = {value}")
+            else:
+                print(f"UPDATE_GRIMOIRE_VALUE Error: Missing grimoire or params: {params}")
+
+        elif command_type == "EXECUTE_PLAYER":
+            if self.rule_enforcer and "player_id" in params and "reason" in params:
+                # The RuleEnforcer._execute_player method already handles logging and status updates.
+                self.rule_enforcer._execute_player(params["player_id"], params["reason"])
+                # Potentially broadcast this event here if not handled by LLM's next commands
+                await self.broadcast_game_event(f"Player {self.grimoire.game_state.get('player_names',{}).get(params['player_id'], params['player_id'])} has died due to: {params['reason']}")
+            else:
+                print(f"EXECUTE_PLAYER Error: Missing rule_enforcer or params: {params}")
+        
+        elif command_type == "REQUEST_PLAYER_ACTION":
+            # This is complex: needs to store that an action is expected, and how to resume.
+            # For now, just log it. The game loop will need to handle this state.
+            player_id = params.get("player_id")
+            action_type = params.get("action_type")
+            print(f"STORYTELLER REQUESTS ACTION: Player {player_id} to perform {action_type} with details {params.get('action_details')}")
+            # This would typically involve setting up a future in self.human_player_expected_actions or a similar mechanism for AI agents
+            # and then the game loop would pause or await these actions before feeding results back to StorytellerLLM.
+            # For example, for night actions:
+            if player_id and action_type == "NIGHT_ACTION" and player_id in self.agents:
+                 # This is a conceptual link; _collect_ai_night_actions would need to be callable for a single agent
+                 # or this command triggers a flag that _collect_ai_night_actions respects.
+                 print(f"GameManager needs to prompt AI {player_id} for their night action based on ST LLM request.")
+                 # We can send a specific message to the player to trigger their UI or AI logic if they are human/external.
+                 await self.send_personal_message(player_id, "REQUEST_NIGHT_ACTION", params.get("action_details", {}))
+            elif player_id and action_type == "VOTE" and player_id in self.agents:
+                 await self.send_personal_message(player_id, "REQUEST_VOTE", params.get("action_details", {}))
+                 print(f"GameManager needs to prompt AI {player_id} for their vote based on ST LLM request.")
+
+        elif command_type == "AWAIT_PLAYER_RESPONSES":
+            # This command implies the GameManager should now pause its loop feeding commands to the ST LLM,
+            # and wait until all players listed in expected_players have submitted their actions for action_id.
+            # The game loop logic will need to be adapted to handle this pausing and resuming.
+            print(f"STORYTELLER AWAITING RESPONSES for action_id {params.get('action_id')} from {params.get('expected_players')}")
+            # Set a flag or state in GameManager that the main loop will check.
+            # self.waiting_for_actions = params # Or some more structured state object
+
+        elif command_type == "END_GAME":
+            if "winner" in params and "reason" in params:
+                print(f"Game Over! Winner: {params['winner']}, Reason: {params['reason']}")
+                await self.broadcast_message("GAME_END", {"winner" : params['winner'], "reason": params['reason']})
+                if self.grimoire: # Clear grimoire to stop game loop
+                    self.grimoire = None 
+                self._game_started_event.clear()
+                if self.game_loop_task and not self.game_loop_task.done():
+                    self.game_loop_task.cancel() # Stop the game loop task
+            else:
+                print(f"END_GAME Error: Missing winner or reason: {params}")
+
+        elif command_type == "ERROR_LOG":
+            print(f"Storyteller LLM Reported Error: {params.get('message')}. Raw Output: {params.get('raw_output', 'N/A')}")
+
+        else:
+            print(f"GameManager Error: Unknown Storyteller command_type: {command_type}")
 
     async def setup_new_game(self, player_ids_roles: Dict[str, str], human_player_ids: List[str] = []):
         async with self._game_lock:
             if self.is_game_running() and self.game_loop_task and not self.game_loop_task.done():
                 print("Game is already running. Cannot setup a new game.")
-                await self.broadcast_game_event("Game is already running. Cannot setup a new game.") # Notify client
+                await self.broadcast_game_event("Game is already running. Cannot setup a new game.")
                 return
 
+            # Initialize basic game structures
             self.grimoire = Grimoire()
-            self.rule_enforcer = RuleEnforcer(self.grimoire, game_manager=self)
+            self.rule_enforcer = RuleEnforcer(self.grimoire, game_manager=self) # Still useful for low-level rule checks if ST LLM delegates
             self.agents = {}
             self._game_started_event.clear()
             self._current_nominating_player_index = 0
@@ -199,49 +321,78 @@ class GameManager:
             self._daily_chat_log = []
 
             if not self.google_api_key:
-                 print("Warning: GOOGLE_API_KEY not set in environment. AI Agents may not function.")
-                 await self.broadcast_game_event("Warning: GOOGLE_API_KEY not set. AI Agents may be passive.")
+                 print("Warning: GOOGLE_API_KEY not set in environment. AI Agents and Storyteller LLM may not function.")
+                 await self.broadcast_game_event("Warning: GOOGLE_API_KEY not set. AI Agents/ST LLM may be passive.")
+            
+            # Prepare context for Storyteller LLM to perform setup
+            initial_context = [
+                f"EVENT: REQUEST_GAME_START received.",
+                f"INPUT_PLAYER_ROLES: {json.dumps(player_ids_roles)}",
+                f"INPUT_HUMAN_PLAYERS: {json.dumps(human_player_ids)}",
+                f"GRIMOIRE_STATE: EMPTY_INITIALIZATION"
+            ]
+            
+            print("Requesting Storyteller LLM to perform game setup...")
+            setup_commands = await self.storyteller_agent.generate_commands(initial_context)
+            print(f"Received setup commands from Storyteller LLM: {setup_commands}")
 
-            player_display_names = {pid: f"AI Player {i+1} ({pid[:4]})" for i, pid in enumerate(player_ids_roles.keys())}
+            for command_obj in setup_commands:
+                await self.execute_storyteller_command(command_obj)
+            
+            # --- The following player agent setup remains, as ST LLM doesn't directly init Python objects ---
+            # ST LLM should have used UPDATE_GRIMOIRE_VALUE to set player names, roles etc.
+            # We now iterate based on grimoire to create agent objects.
 
+            if not self.grimoire:
+                print("CRITICAL ERROR: Grimoire not initialized by Storyteller LLM during setup.")
+                # Potentially send an error message to client or halt.
+                await self.broadcast_game_event("Critical setup error: Storyteller LLM failed to initialize Grimoire.")
+                return
+            
+            player_display_names = self.grimoire.game_state.get("player_names", {})
             all_player_role_info = [] # For broadcasting roles to observer
 
+            # Ensure all players from input are in grimoire after ST LLM setup
             for player_id, role_name in player_ids_roles.items():
-                role_details = get_role_details(role_name)
-                if not role_details:
-                    print(f"Warning: Role {role_name} not found for player {player_id}. Skipping.")
-                    continue
+                if player_id not in self.grimoire.players:
+                    print(f"Warning: Player {player_id} ({role_name}) was in input but not added to Grimoire by Storyteller LLM. Adding manually.")
+                    # This is a fallback, ideally ST LLM handles all additions via commands
+                    alignment = get_role_details(role_name)["alignment"].value if get_role_details(role_name) else "Unknown"
+                    self.grimoire.add_player(player_id, role_name, alignment)
+                    # Also ensure name is set if ST LLM missed it
+                    if player_id not in player_display_names:
+                        player_display_names[player_id] = f"AI Player ({player_id[:4]})" # Generic name
+                        self.grimoire.game_state.setdefault("player_names", {})[player_id] = player_display_names[player_id]
                 
-                alignment = role_details["alignment"].value
-                self.grimoire.add_player(player_id, role_name, alignment)
-                self.grimoire.game_state.setdefault("player_names", {})[player_id] = player_display_names[player_id]
-                all_player_role_info.append({"id": player_id, "name": player_display_names[player_id], "role": role_name})
+                # Populate role info for observer using grimoire's state
+                actual_role_name = self.grimoire.get_player_role(player_id)
+                display_name = player_display_names.get(player_id, player_id)
+                all_player_role_info.append({"id": player_id, "name": display_name, "role": actual_role_name})
 
-                if player_id not in human_player_ids: # Should always be true for AI-only game
+                # Initialize PlayerAgent objects
+                if player_id not in human_player_ids:
+                    alignment = self.grimoire.get_player_alignment(player_id)
                     if self.google_api_key:
-                        self.agents[player_id] = PlayerAgent(player_id, role_name, alignment, api_key=self.google_api_key, game_manager=self) # Pass game_manager
-                        print(f"Initialized AI Agent for {player_display_names[player_id]} as {role_name} ({alignment})")
+                        self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=self.google_api_key, game_manager=self)
+                        print(f"Initialized AI Agent for {display_name} as {actual_role_name} ({alignment})")
                     else:
-                        print(f"Skipping AI agent for {player_display_names[player_id]} due to missing API key. Player will be passive.")
-                        #could add a simple non-LLM agent or mark as human-controlled placeholder
-                        # Ensure PlayerAgent is initialized with game_manager if it needs to call broadcast_game_event or similar
-                        self.agents[player_id] = PlayerAgent(player_id, role_name, alignment, api_key=self.google_api_key, game_manager=self)
+                        # Fallback to passive agent if no API key
+                        self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=None, game_manager=self)
+                        print(f"Skipping LLM for AI agent {display_name} due to missing API key. Player will be passive.")
                 else:
-                    # This block should ideally not be reached if human_player_ids is empty
-                    print(f"Player {player_display_names[player_id]} ({role_name}) is a human player. (This is unexpected for AI-only setup)")
-
-            await self.rule_enforcer.assign_roles_and_setup_game(requested_player_count=len(self.grimoire.players))
+                     print(f"Player {display_name} ({actual_role_name}) is a human player.")
+            # --- End of PlayerAgent setup ---
             
-            print(f"Game setup complete. Initial phase: {self.grimoire.current_phase}")
-            await self.broadcast_player_roles(all_player_role_info) # Broadcast all roles
-            await self.broadcast_game_state("Initial game state")
-            await self.broadcast_game_event(f"Game setup with {len(all_player_role_info)} AI players. Phase: {self.grimoire.current_phase}.") # General event
+            # Final broadcasts after ST LLM setup and Agent init
+            await self.broadcast_player_roles(all_player_role_info) # Broadcast all roles based on Grimoire
+            await self.broadcast_game_state("Initial game state after ST LLM setup")
+            await self.broadcast_game_event(f"Game setup by Storyteller LLM with {len(self.grimoire.players)} players. Phase: {self.grimoire.current_phase}.")
             
             if self.game_loop_task and not self.game_loop_task.done():
                 self.game_loop_task.cancel()
             self.game_loop_task = asyncio.create_task(self.run_game_loop())
             self._game_started_event.set()
-            print("Game loop task created and started event set.")
+            print("Game loop task created and started event set after Storyteller LLM setup.")
 
     async def connect(self, websocket: WebSocket, player_id: str):
         await websocket.accept()
