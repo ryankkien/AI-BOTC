@@ -251,7 +251,19 @@ class GameManager:
             await self.send_private_info(player_id)
             await self.send_public_state_to_player(player_id, "Welcome to the game!")
         else:
-             await websocket.send_text(json.dumps({"type": "INFO", "payload": "Game not fully setup or player not in game. Waiting..."}))
+            try:
+                 await websocket.send_text(json.dumps({"type": "INFO", "payload": "Game not fully setup or player not in game. Waiting..."}))
+            except KeyError as ke_initial_send:
+                if player_id == "ObserverClient":
+                    print(f"Handled known KeyError during initial send_text to ObserverClient: {repr(ke_initial_send)}")
+                    #log and continue, do not let it propagate
+                else:
+                    print(f"Unexpected KeyError during initial send_text to {player_id}: {repr(ke_initial_send)}")
+                    raise #re-raise for other clients
+            except Exception as e_initial_send:
+                print(f"Error during initial send_text to {player_id}: {type(e_initial_send).__name__} - {e_initial_send}")
+                if player_id != "ObserverClient":
+                    raise #re-raise for other clients if severe
 
     def disconnect(self, player_id: str):
         if player_id in self.active_connections:
@@ -265,18 +277,44 @@ class GameManager:
         if player_id in self.active_connections:
             try:
                 await self.active_connections[player_id].send_text(json.dumps({"type": message_type, "payload": payload, "to":player_id}))
+            except json.JSONDecodeError as je:
+                print(f"JSON ENCODE Error sending personal message to {player_id}: {je}") # Should not happen with json.dumps, but for completeness
+            except KeyError as ke_send_personal:
+                 print(f"KEYERROR sending personal message to {player_id}: {repr(ke_send_personal)}")
             except Exception as e:
-                print(f"Error sending personal message to {player_id}: {e}")
+                print(f"Error sending personal message to {player_id}: {type(e).__name__} - {e}")
                 #self.disconnect(player_id) #disconnecting here might be too aggressive
 
     async def broadcast_message(self, message_type: str, payload: Any, exclude_player_ids: List[str] = []):
-        message_str = json.dumps({"type": message_type, "payload": payload})
-        for player_id, connection in list(self.active_connections.items()):
+        message_str = ""
+        try:
+            message_str = json.dumps({"type": message_type, "payload": payload})
+        except KeyError as ke_json_dump:
+            print(f"!!!! KEYERROR during json.dumps in broadcast_message: {repr(ke_json_dump)}. Payload was: {payload}")
+            # If json.dumps fails, we can't proceed with broadcasting this message.
+            return 
+        except Exception as e_json_dump:
+            print(f"Error during json.dumps in broadcast_message: {type(e_json_dump).__name__} - {e_json_dump}. Payload was: {payload}")
+            return # Can't proceed
+
+        for player_id, connection in list(self.active_connections.items()): # Iterate over a copy
             if player_id not in exclude_player_ids:
                 try:
                     await connection.send_text(message_str)
+                except KeyError as ke_broadcast_send:
+                    if player_id == "ObserverClient":
+                        #specifically handle the known issue with observerclient
+                        #observer may miss message
+                        print(f"Handled known KeyError during send_text to ObserverClient (observer may miss message): {repr(ke_broadcast_send)}")
+                        #for now, just log and continue, preventing the error from propagating.
+                    else:
+                        #if keyerror happens for a non-observerclient during send_text, this is highly unusual.
+                        #log it and re-raise as it might indicate a more severe problem.
+                        print(f"!!!! UNEXPECTED KEYERROR during send_text to {player_id} in broadcast_message: {repr(ke_broadcast_send)}")
+                        raise #re-raise for unexpected cases
                 except Exception as e:
-                    print(f"Error broadcasting to {player_id}: {e}")
+                    print(f"Error broadcasting to {player_id} (during send_text): {type(e).__name__} - {e}")
+                    # self.disconnect(player_id) # Consider if a disconnect is too aggressive here
     
     async def send_public_state_to_player(self, player_id: str, reason: str):
         if not self.grimoire: return
@@ -548,13 +586,25 @@ class GameManager:
                         print(f"It is {current_nominator_id}'s turn to nominate.")
                         #if AI, trigger nomination. If human, wait for NOMINATE message handled by handle_incoming_message
                         if current_nominator_id in self.agents:
-                            #todo: AI nomination logic
-                            #chosen_nominee = await self.agents[current_nominator_id].decide_nomination(...
-                            #if chosen_nominee: self.rule_enforcer.process_nomination(current_nominator_id, chosen_nominee)
-                            #await self.broadcast_game_state(f"AI {current_nominator_id} nominated ..."
-                            print(f"AI {current_nominator_id} would nominate now.")
-                            self._current_nominating_player_index +=1 #temp: auto advance for AI for now
-                            await asyncio.sleep(1) # Simulate AI thinking
+                            # ai nomination: let agent choose a nominee
+                            alive_with_names = [
+                                {"id": pid, "name": self.grimoire.game_state.get("player_names", {}).get(pid, pid)}
+                                for pid in self.grimoire.get_alive_players()
+                            ]
+                            chosen_nominee = await self.agents[current_nominator_id].decide_nomination(
+                                game_state_summary, alive_with_names, []
+                            )
+                            if chosen_nominee:
+                                self.rule_enforcer.process_nomination(current_nominator_id, chosen_nominee)
+                                await self.broadcast_game_state(
+                                    f"AI {current_nominator_id} nominated {chosen_nominee}."
+                                )
+                            else:
+                                # no nomination from this agent, move to next
+                                self._current_nominating_player_index +=1
+                                continue
+                            # after nomination, proceed to voting phase in next loop
+                            continue
                         else: #human nominator, handled by handle_incoming_message which will call rule_enforcer
                             #the game loop effectively pauses here for this human action until message arrives or timeout
                             await asyncio.sleep(30) #simple wait, real solution needs futures from handle_incoming_message
@@ -663,15 +713,16 @@ class GameManager:
         """
         if not self.grimoire: return
 
-        # Create a list of player details for AI context (name and ID)
-        # This should be part of game_state_summary_for_ai or passed additionally
-        all_player_details_for_prompt = []
-        for p_id, p_data in self.grimoire.players.items():
-            all_player_details_for_prompt.append({
+        # create a list of player details for ai context (name and id)
+        # iterate over the players list instead of using .items()
+        all_player_details_for_prompt = [
+            {
                 "id": p_id,
                 "name": self.grimoire.game_state.get("player_names", {}).get(p_id, p_id),
                 "is_alive": self.grimoire.is_player_alive(p_id)
-            })
+            }
+            for p_id in self.grimoire.players
+        ]
 
         communication_tasks = {}
         for agent_id, agent in self.agents.items():
@@ -744,13 +795,48 @@ async def websocket_endpoint(websocket: WebSocket, player_id: str):
     await game_manager.connect(websocket, player_id)
     try:
         while True:
-            data = await websocket.receive_text()
+            data = ""
+            try:
+                data = await websocket.receive_text()
+            except WebSocketDisconnect:
+                raise
+            except KeyError as ke_recv:
+                if player_id == "ObserverClient" and ke_recv.args == ('name',):
+                    print(f"Handled known KeyError('name') during receive_text for ObserverClient: {repr(ke_recv)}. Disconnecting observer.")
+                    game_manager.disconnect(player_id) #ensure disconnection
+                    return #exit the while True loop and thus the endpoint function
+                else:
+                    #log other KeyErrors or for other clients before re-raising
+                    print(f"KeyError during websocket.receive_text() for {player_id}: ExceptionType={type(ke_recv)}, Args={ke_recv.args}, ExceptionRepr={repr(ke_recv)}")
+                    raise #re-raise
+            except Exception as e_recv:
+                print(f"Error specifically during websocket.receive_text() for {player_id}: ExceptionType={type(e_recv)}, Args={e_recv.args}, ExceptionRepr={repr(e_recv)}")
+                raise # Re-raise to be caught by the outer loop
             await game_manager.handle_incoming_message(player_id, data)
     except WebSocketDisconnect:
         game_manager.disconnect(player_id)
     except Exception as e:
-        # Print more detailed error information
-        print(f"Error in WebSocket connection for {player_id}: ExceptionType={type(e)}, Args={e.args}, ExceptionRepr={repr(e)}")
+        # Print more detailed error information safely
+        err_type_name = type(e).__name__ # Get type name safely
+        err_args_str = "N/A"
+        try:
+            err_args_str = str(e.args) # Try to get args as string
+        except Exception:
+            err_args_str = "[Could not retrieve e.args]"
+        
+        err_repr_str = "N/A"
+        try:
+            err_repr_str = repr(e) # Try to get repr as string
+        except Exception: # If repr(e) itself errors (like causing a KeyError)
+            err_repr_str = f"[Could not retrieve repr(e). Original error type was: {err_type_name}]"
+
+        scope_info = "N/A"
+        try:
+            scope_info = str(websocket.scope) # Log the scope
+        except Exception as e_scope:
+            scope_info = f"[Could not retrieve websocket.scope due to: {type(e_scope).__name__}]"
+
+        print(f"Error in WebSocket connection for {player_id}: OriginalExceptionType={err_type_name}, OriginalArgs={err_args_str}, OriginalReprAttempt={err_repr_str}, Scope={scope_info}")
         game_manager.disconnect(player_id)
 
 if __name__ == "__main__":

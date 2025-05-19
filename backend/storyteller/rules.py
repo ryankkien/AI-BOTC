@@ -115,7 +115,7 @@ class RuleEnforcer:
             # One is that Townsfolk, the other is not (or is also that TF if 2 are in play and picked)
             townsfolk_in_play = [pid for pid, role in self.grimoire.roles.items() if get_role_details(role)["type"] == RoleType.TOWNSFOLK and pid != ww_id]
             if townsfolk_in_play:
-                target_townsfolk_role = get_role_details(self.grimoire.get_player_role(random.choice(townsfolk_in_play)))["name"]
+                target_townsfolk_role = self.grimoire.get_player_role(random.choice(townsfolk_in_play))
                 
                 #select 2 players, one of whom IS the target_townsfolk_role
                 players_with_target_role = [pid for pid in townsfolk_in_play if self.grimoire.get_player_role(pid) == target_townsfolk_role]

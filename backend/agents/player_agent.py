@@ -5,6 +5,8 @@ from dotenv import load_dotenv #import load_dotenv
 from typing import Dict, List, Any, Optional
 from .base_agent import BaseAgent
 from ..storyteller.roles import ROLES_DATA, RoleAlignment #added RoleAlignment
+import time
+import asyncio
 
 load_dotenv() #load environment variables from .env
 
@@ -102,6 +104,20 @@ class PlayerAgent(BaseAgent):
             prompt += additional_context + "\n"
         return prompt
 
+    async def _rate_limited_generate(self, *args, **kwargs):
+        #throttle llm calls to respect rate limits
+        # default interval set to 6 seconds for 10 RPM limit (60 sec / 10 requests)
+        min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
+        now = time.monotonic()
+        last_time = getattr(self, "_last_llm_call_time", None)
+        if last_time is not None:
+            elapsed = now - last_time
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+        response = await self.llm.generate_content_async(*args, **kwargs)
+        self._last_llm_call_time = time.monotonic()
+        return response
+
     async def get_night_action(self, game_state: Dict[str, Any], alive_player_ids_with_names: List[Dict[str,str]]) -> Optional[Dict[str, Any]]:
         if not self.llm or not self.status["alive"]:
             return None
@@ -164,7 +180,7 @@ class PlayerAgent(BaseAgent):
         full_prompt += "\nCarefully consider your role, objectives, and available information. Then, provide your decision in the specified format."
 
         try:
-            response = await self.llm.generate_content_async(full_prompt)
+            response = await self._rate_limited_generate(full_prompt)
             choice_text = response.text.strip()
             print(f"{self.player_id} ({self.role}) Night Action LLM Raw Response: {choice_text}")
 
@@ -218,8 +234,10 @@ class PlayerAgent(BaseAgent):
             "What is your current theory about who is good and who is evil? Why?\n"
             "What do you want other players to believe right now?\n"
             "What specific information, if any, are you trying to elicit or subtly convey?\n"
+            "Encourage transparency: if you have pertinent information or reasoning, share it publicly.\n"
+            "If any player has been notably silent or hasn't explained their thoughts, consider politely calling out their silence as suspicious.\n"
             "Based on all this, formulate your chat message. It should be in character.\n"
-            "If you have nothing strategic to say or prefer to remain silent for a moment, respond with the exact word: SILENT"
+            "If you genuinely have nothing to add or prefer to remain silent, respond with the exact word: SILENT"
         )
 
         # _build_prompt_context will use game_state["daily_chat_log"] which should be comprehensive
@@ -227,7 +245,7 @@ class PlayerAgent(BaseAgent):
         full_prompt += "\nReturn ONLY your chat message text, or SILENT."
         
         try:
-            response = await self.llm.generate_content_async(full_prompt)
+            response = await self._rate_limited_generate(full_prompt)
             message = response.text.strip()
             if message.upper() == "SILENT":
                 return None # Indicate no message
@@ -261,7 +279,7 @@ class PlayerAgent(BaseAgent):
         full_prompt += "\nThink step-by-step. Then, provide your nomination choice in the specified format, ensuring PlayerID is exact."
 
         try:
-            response = await self.llm.generate_content_async(full_prompt)
+            response = await self._rate_limited_generate(full_prompt)
             choice_text = response.text.strip()
             print(f"{self.player_id} ({self.role}) Nomination LLM Raw Response: {choice_text}")
             if choice_text.startswith("NOMINATE:"):
@@ -294,7 +312,7 @@ class PlayerAgent(BaseAgent):
         full_prompt += "\nThink step-by-step. Then, provide your vote choice in the specified format."
 
         try:
-            response = await self.llm.generate_content_async(full_prompt)
+            response = await self._rate_limited_generate(full_prompt)
             choice_text = response.text.strip().upper()
             print(f"{self.player_id} ({self.role}) Vote LLM Raw Response: {choice_text}")
             if choice_text == "VOTE: YES":
@@ -421,7 +439,7 @@ class PlayerAgent(BaseAgent):
         full_prompt = self._build_prompt_context(game_state, additional_context=comm_prompt)
 
         try:
-            response = await self.llm.generate_content_async(full_prompt)
+            response = await self._rate_limited_generate(full_prompt)
             raw_response_text = response.text.strip()
             print(f"{self.player_id} ({self.role}) Communication LLM Raw Response: {raw_response_text}")
 
