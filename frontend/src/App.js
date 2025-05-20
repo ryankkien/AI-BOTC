@@ -21,6 +21,9 @@ function App() {
   const [storytellerLLMDebug, setStorytellerLLMDebug] = useState({ prompts: [], responses: [] });
   const [selectedPlayerId, setSelectedPlayerId] = useState(null);
   const [showStorytellerDebug, setShowStorytellerDebug] = useState(false);
+  const [activeLogTab, setActiveLogTab] = useState('player');
+  const playerMessages = messages.filter(msg => msg.sender !== 'Storyteller');
+  const gameMessages = messages.filter(msg => msg.sender === 'Storyteller');
 
   const handlePlayerSelect = (playerId) => {
     setSelectedPlayerId(playerId);
@@ -148,7 +151,19 @@ function App() {
       <div className="game-layout">
         <div className="main-game-area">
           <TownSquare players={players} onPlayerClick={handlePlayerSelect} />
-          <ChatPanel messages={messages} onSendMessage={sendMessage} />
+          <div className="log-tabs">
+            <div className="tabs-header">
+              <button className={activeLogTab === 'player' ? 'active-tab' : ''} onClick={() => setActiveLogTab('player')}>Player Log</button>
+              <button className={activeLogTab === 'game' ? 'active-tab' : ''} onClick={() => setActiveLogTab('game')}>Game Log</button>
+            </div>
+            <div className="tabs-content">
+              {activeLogTab === 'player' ? (
+                <ChatPanel title="Player Log" messages={playerMessages} onSendMessage={sendMessage} humanPlayerId={humanPlayerId} />
+              ) : (
+                <ChatPanel title="Game Log" messages={gameMessages} readOnly humanPlayerId={humanPlayerId} />
+              )}
+            </div>
+          </div>
         </div>
         <div className="side-panel">
           <PrivateInfoPanel info={privateInfo} />

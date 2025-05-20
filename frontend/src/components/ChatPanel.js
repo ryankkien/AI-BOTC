@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 const chatPanelStyle = {
   display: 'flex',
   flexDirection: 'column',
-  height: '300px', //fixed height for scroll
+  flexGrow: 1, // replaced fixed height with flexGrow for tabs
   border: '1px solid #ccc',
   borderRadius: '5px',
   padding: '10px',
@@ -50,7 +50,7 @@ const buttonStyle = {
   borderRadius: '0 5px 5px 0'
 };
 
-function ChatPanel({ messages = [], onSendMessage, humanPlayerId = "HumanPlayer1" }) {
+function ChatPanel({ title = "Chat", messages = [], onSendMessage, humanPlayerId = "HumanPlayer1", readOnly = false }) {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef(null);
 
@@ -77,7 +77,7 @@ function ChatPanel({ messages = [], onSendMessage, humanPlayerId = "HumanPlayer1
 
   return (
     <div style={chatPanelStyle} className="chat-panel">
-      <h3>Chat</h3>
+      <h3>{title}</h3>
       <div style={messagesAreaStyle}>
         {messages.map((msg, index) => (
           <div key={index} style={messageStyle(msg.sender === humanPlayerId || msg.sender === 'You')}>
@@ -87,17 +87,19 @@ function ChatPanel({ messages = [], onSendMessage, humanPlayerId = "HumanPlayer1
         ))}
         <div ref={messagesEndRef} />
       </div>
-      <div style={inputAreaStyle}>
-        <input 
-          type="text" 
-          value={inputValue} 
-          onChange={(e) => setInputValue(e.target.value)} 
-          onKeyPress={handleKeyPress}
-          style={inputStyle}
-          placeholder="Type your message..."
-        />
-        <button onClick={handleSend} style={buttonStyle}>Send</button>
-      </div>
+      {!readOnly && (
+        <div style={inputAreaStyle}>
+          <input 
+            type="text" 
+            value={inputValue} 
+            onChange={(e) => setInputValue(e.target.value)} 
+            onKeyPress={handleKeyPress}
+            style={inputStyle}
+            placeholder="Type your message..."
+          />
+          <button onClick={handleSend} style={buttonStyle}>Send</button>
+        </div>
+      )}
     </div>
   );
 }
