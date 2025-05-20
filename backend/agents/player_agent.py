@@ -13,6 +13,10 @@ load_dotenv() #load environment variables from .env
 #configure the genai api key
 #genai.configure(api_key=os.getenv("GOOGLE_API_KEY")) #this will be done in init
 
+#global variables for rate limiting across all playeragent instances
+_last_global_llm_call_time: float = None
+_llm_rate_limit_lock = asyncio.Lock()
+
 class PlayerAgent(BaseAgent):
     def __init__(self, player_id: str, role: str, alignment: str, api_key: Optional[str] = None, game_manager: Optional[Any] = None): # Added game_manager
         super().__init__(player_id, role, alignment)
@@ -105,33 +109,29 @@ class PlayerAgent(BaseAgent):
         return prompt
 
     async def _rate_limited_generate(self, *args, **kwargs):
-        # throttle llm calls to respect rate limits
-        # default interval set to 6 seconds for 10 RPM limit (60 sec / 10 requests)
+        global _last_global_llm_call_time
+        #global rate limiting across all agents to respect rate limits
         min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
-        now = time.monotonic()
-        last_time = getattr(self, "_last_llm_call_time", None)
-        if last_time is not None:
-            elapsed = now - last_time
-            if elapsed < min_interval:
-                await asyncio.sleep(min_interval - elapsed)
-        # extract prompt for debugging
-        prompt_text = args[0] if args else ""
-        # broadcast prompt to observer
-        try:
-            if self.game_manager:
-                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "prompt": prompt_text})
-        except Exception:
-            pass
-        # call the LLM
-        response = await self.llm.generate_content_async(*args, **kwargs)
-        self._last_llm_call_time = time.monotonic()
-        # broadcast response for debugging
-        try:
-            if self.game_manager:
-                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "response": response.text})
-        except Exception:
-            pass
-        return response
+        async with _llm_rate_limit_lock:
+            now = time.monotonic()
+            if _last_global_llm_call_time is not None:
+                elapsed = now - _last_global_llm_call_time
+                if elapsed < min_interval:
+                    await asyncio.sleep(min_interval - elapsed)
+            prompt_text = args[0] if args else ""
+            try:
+                if self.game_manager:
+                    await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "prompt": prompt_text})
+            except Exception:
+                pass
+            response = await self.llm.generate_content_async(*args, **kwargs)
+            _last_global_llm_call_time = time.monotonic()
+            try:
+                if self.game_manager:
+                    await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "response": response.text})
+            except Exception:
+                pass
+            return response
 
     async def get_night_action(self, game_state: Dict[str, Any], alive_player_ids_with_names: List[Dict[str,str]]) -> Optional[Dict[str, Any]]:
         if not self.llm or not self.status["alive"]:
