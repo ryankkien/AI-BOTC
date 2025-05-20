@@ -73,6 +73,8 @@ html = """
             <div class="sidebar">
                 <h2>Player Roles</h2>
                 <ul id="playerRoles"></ul>
+                <h2>Memory</h2>
+                <div id="memoryPanel" style="white-space: pre-wrap; border:1px solid #eee; padding:5px; flex-grow:1; overflow-y:auto;"></div>
             </div>
         </div>
 
@@ -149,12 +151,20 @@ html = """
                             // addMessageToList(storytellerLog, JSON.stringify(payload, null, 2), "game-event");
                             break;
                         case "PLAYER_ROLES_UPDATE": // New message type for roles
-                            rolesMap = {}; // reset roles mapping
-                            playerRolesList.innerHTML = ''; // Clear previous roles
+                            rolesMap = {};
+                            playerRolesList.innerHTML = '';
                             if (payload.roles && Array.isArray(payload.roles)) {
                                 payload.roles.forEach((player, idx) => {
                                     rolesMap[player.id] = player.role;
-                                    addMessageToList(playerRolesList, `${idx+1}. ${player.name}: ${player.role}`, "role-item");
+                                    const li = document.createElement('li');
+                                    li.className = 'role-item';
+                                    li.textContent = `${idx+1}. ${player.name}: ${player.role}`;
+                                    li.dataset.playerId = player.id;
+                                    li.style.cursor = 'pointer';
+                                    li.addEventListener('click', () => {
+                                        ws.send(JSON.stringify({ type: 'REQUEST_MEMORY', payload: { player_id: player.id } }));
+                                    });
+                                    playerRolesList.appendChild(li);
                                 });
                             }
                             break;
@@ -166,6 +176,11 @@ html = """
                             const role = rolesMap[payload.sender] || '';
                             const display = role ? `${senderName} (${role})` : senderName;
                             addMessageToList(messagesList, `${display}: ${payload.text}`, "chat-message");
+                            break;
+                        case "MEMORY_UPDATE":
+                            const memPid = payload.player_id;
+                            const mem = payload.memory;
+                            document.getElementById('memoryPanel').textContent = JSON.stringify(mem, null, 2);
                             break;
                         default:
                             addMessageToList(storytellerLog, `UNKNOWN [${messageType}]: ${displayText}`, "game-event");
@@ -355,6 +370,16 @@ class GameManager:
         if command_type == "LOG_EVENT":
             if self.grimoire and "event_type" in params and "data" in params:
                 self.grimoire.log_event(params["event_type"], params["data"])
+                # update AI agents' memory for key events
+                for agent in self.agents.values():
+                    etype = params["event_type"]
+                    edata = params["data"]
+                    if etype == "CHAT":
+                        agent.update_memory("CHAT_MESSAGE", edata)
+                    elif etype == "NOMINATION":
+                        agent.update_memory("NOMINATION_EVENT", edata)
+                    elif etype in ("VOTE_RESULT", "VOTING_RESULT"):  # ST LLM may use VOTING_RESULT
+                        agent.update_memory("VOTE_RESULT", edata)
             else:
                 print(f"LOG_EVENT Error: Missing grimoire, event_type, or data in params: {params}")
 
@@ -370,8 +395,12 @@ class GameManager:
                 ai_id = params["player_id"]
                 msg_type = params["message_type"]
                 data = params["payload"]
-                if ai_id in self.agents and msg_type == "PRIVATE_NIGHT_INFO":
-                    self.agents[ai_id].update_memory("PRIVATE_NIGHT_INFO", data)
+                if ai_id in self.agents:
+                    if msg_type == "PRIVATE_NIGHT_INFO":
+                        self.agents[ai_id].update_memory("PRIVATE_NIGHT_INFO", data)
+                    if msg_type == "PRIVATE_INFO_UPDATE":
+                        # store full private info payload
+                        self.agents[ai_id].memory["private_info"] = data
                 await self.send_personal_message(ai_id, msg_type, data)
             else:
                 print(f"SEND_PERSONAL_MESSAGE Error: Missing player_id, message_type, or payload: {params}")
@@ -566,9 +595,28 @@ class GameManager:
                         self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=self.google_api_key, game_manager=self)
                         print(f"Initialized AI Agent for {display_name} as {actual_role_name} ({alignment})")
                     else:
-                        # Fallback to passive agent if no API key
                         self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=None, game_manager=self)
                         print(f"Skipping LLM for AI agent {display_name} due to missing API key. Player will be passive.")
+                    # populate initial private info into agent.memory
+                    agent = self.agents[player_id]
+                    role_details = get_role_details(actual_role_name)
+                    private_payload = {
+                        "role": actual_role_name,
+                        "alignment": alignment,
+                        "description": role_details.get("description", ""),
+                        "clues": self.grimoire.get_private_clues(player_id)
+                    }
+                    # extra info: demon/minion/red_herring if applicable
+                    if role_details.get("knows_demon", False):
+                        demon_ids = [pid for pid, r in self.grimoire.roles.items() if r == "Imp"]
+                        private_payload["known_demon"] = demon_ids[0] if demon_ids else None
+                    if actual_role_name == "Imp":
+                        minion_ids = [pid for pid, r in self.grimoire.roles.items() if get_role_details(r)["type"] == RoleType.MINION]
+                        private_payload["known_minions"] = minion_ids
+                        private_payload["demon_bluffs"] = getattr(self.grimoire, "demon_bluffs", [])
+                    if role_details.get("has_red_herring", False):
+                        private_payload["red_herring"] = getattr(self.grimoire, "fortune_teller_red_herring", None)
+                    agent.memory["private_info"] = private_payload
                 else:
                      print(f"Player {display_name} ({actual_role_name}) is a human player.")
             # --- End of PlayerAgent setup ---
@@ -911,6 +959,9 @@ class GameManager:
                 self.grimoire.log_event("CHAT", chat_event)
                 self._daily_chat_log.append(chat_event)
                 await self.broadcast_message("CHAT_MESSAGE", chat_event)
+                # update all AI memories with public chat
+                for agent in self.agents.values():
+                    agent.update_memory("CHAT_MESSAGE", chat_event)
             elif comm_type == "PRIVATE_CHAT" and text and recipient_id:
                 if recipient_id != agent_id and recipient_id in self.agents: # Cannot private chat self, must be valid AI
                     print(f"AI {sender_name} ({agent_id}) sending private message to {recipient_id}: {text}")
@@ -950,6 +1001,9 @@ class GameManager:
             chat_event = {"sender": player_id, "sender_name": self.grimoire.game_state.get("player_names", {}).get(player_id, player_id), "text": text, "timestamp": "#timestamp#"}
             self._daily_chat_log.append(chat_event)
             await self.broadcast_message("CHAT_MESSAGE", chat_event)
+            # update AI memories for human chat
+            for agent in self.agents.values():
+                agent.update_memory("CHAT_MESSAGE", chat_event)
 
         elif msg_type in ("REQUEST_NIGHT_ACTION_RESPONSE", "REQUEST_NOMINATION", "REQUEST_VOTE", "REQUEST_CHAT_DECISION", "REQUEST_GENERIC_ACTION"):
             # human response to Storyteller action prompt
@@ -957,6 +1011,14 @@ class GameManager:
             if action_id and action_id in self.pending_storyteller_actions:
                 self.pending_storyteller_actions[action_id]["received_actions"][player_id] = payload
                 print(f"received human action for {player_id}, action_id {action_id}: {payload}")
+
+        elif msg_type == "REQUEST_MEMORY":
+            requested = payload.get("player_id")
+            if requested in self.agents:
+                memory = self.agents[requested].memory
+                await self.send_personal_message(player_id, "MEMORY_UPDATE", {"player_id": requested, "memory": memory})
+            else:
+                print(f"REQUEST_MEMORY for unknown player {requested}")
 
         else:
             print(f"unknown message type from {player_id}: {msg_type}")

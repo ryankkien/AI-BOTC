@@ -51,8 +51,12 @@ class PlayerAgent(BaseAgent):
                 "public_chat_log": [], # Should be updated by GameManager or via an update_memory method
                 "private_chat_logs": {}, # Dict keyed by other player_id
                 "observations": [],
-                "actions_taken": []
+                "actions_taken": [],
+                "important_events": []
             }
+
+        # ensure we track important curated events
+        self.memory.setdefault("important_events", [])
 
     def _build_prompt_context(self, game_state: Dict[str, Any], additional_context: str = "") -> str:
         prompt = self.get_persona_summary() + "\n"
@@ -345,6 +349,26 @@ class PlayerAgent(BaseAgent):
             print(f"Error during LLM call for {self.player_id} vote: {e}")
             return False #safer default
 
+    async def _curate_memory(self, event_type: str, data: Any):
+        # use LLM to decide if an event is worth remembering long-term
+        if not self.llm or not self.status.get("alive", False):
+            return
+        # craft a simple curator prompt
+        prompt = (
+            f"You are a memory curator for {self.player_id}.\n"
+            f"Decide whether to KEEP or DISCARD the following game event.\n"
+            f"Event type: {event_type}\n"
+            f"Data: {data}\n"
+            "If it is strategically important, reply KEEP; otherwise reply DISCARD."
+        )
+        try:
+            response = await self._rate_limited_generate(prompt)
+            decision = response.text.strip().upper()
+            if "KEEP" in decision:
+                self.memory.setdefault("important_events", []).append({"type": event_type, "data": data})
+        except Exception:
+            pass
+
     def update_memory(self, event_type: str, data: Any):
         #this should be called by GameManager when events occur
         #ensure data format is consistent for what is appended
@@ -360,7 +384,8 @@ class PlayerAgent(BaseAgent):
             self.status.update(data)
         elif event_type == "ROLE_DESCRIPTION": # Storyteller gives full role desc on game start
             self.memory["known_info"].append({"type": "ROLE_INFO", "description": data})
-        #can add more specific memory updates
+        # schedule curation of this event
+        asyncio.create_task(self._curate_memory(event_type, data))
 
     def get_persona_summary(self) -> str:
         # Base persona string
@@ -418,18 +443,18 @@ class PlayerAgent(BaseAgent):
 
         if self.memory.get("private_info"):
             summary += f"  Storyteller told me (private info): {self.memory['private_info']}\n"
-        
-        # Example: Add more details from memory as it gets structured
-        # if self.memory.get("suspicions"):
-        #     summary += f"  Current Suspicions: {self.memory['suspicions']}\n"
-        # if self.memory.get("trusted_allies"):
-        #     summary += f"  Considered Trusted: {self.memory['trusted_allies']}\n"
-        
+        if self.memory.get("private_clues"):
+            summary += f"  Private clues: {self.memory['private_clues']}\n"
+        if self.memory.get("votes"):
+            summary += f"  Recorded votes: {self.memory['votes']}\n"
+        if self.memory.get("nominations"):
+            summary += f"  Nominations made: {self.memory['nominations']}\n"
+        if self.memory.get("important_events"):
+            summary += f"  Important events: {self.memory['important_events']}\n"
         # Include a note about private chat if it exists
         if self.memory.get("private_chat_logs"):
             summary += "  You have had private conversations.\n"
-            
-        return summary 
+        return summary
 
     async def decide_communication(self, game_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self.llm or not self.status["alive"]:
