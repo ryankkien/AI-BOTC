@@ -152,9 +152,9 @@ html = """
                             rolesMap = {}; // reset roles mapping
                             playerRolesList.innerHTML = ''; // Clear previous roles
                             if (payload.roles && Array.isArray(payload.roles)) {
-                                payload.roles.forEach(player => {
+                                payload.roles.forEach((player, idx) => {
                                     rolesMap[player.id] = player.role;
-                                    addMessageToList(playerRolesList, `${player.name} (${player.id.substring(0,4)}): ${player.role}`, "role-item");
+                                    addMessageToList(playerRolesList, `${idx+1}. ${player.name}: ${player.role}`, "role-item");
                                 });
                             }
                             break;
@@ -246,7 +246,20 @@ class GameManager:
         self.storyteller_agent = StorytellerAgent(api_key=self.google_api_key, game_manager=self)
 
     def is_game_running(self) -> bool:
-        return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set() #game is running if setup and loop started
+        return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set()
+
+    def get_available_actions(self, player_id: str, action_type: str) -> List[str]:
+        #return canonical list of what actions a given player can take for a specific action_type
+        if action_type.startswith("NIGHT_ACTION"):
+            return ["CHOOSE_ONE", "CHOOSE_TWO", "PASS"]
+        elif action_type == "NOMINATION_CHOICE":
+            return ["NOMINATE", "PASS_NOMINATION"]
+        elif action_type == "VOTE_CHOICE":
+            return ["VOTE_YES", "VOTE_NO"]
+        elif action_type == "COMMUNICATION_CHOICE":
+            return ["PUBLIC_CHAT", "PRIVATE_CHAT", "SILENT"]
+        else:
+            return []
 
     async def _get_ai_player_action(self, player_id: str, action_id: str, action_type: str, action_details: Dict[str, Any]):
         agent = self.agents.get(player_id)
@@ -262,7 +275,9 @@ class GameManager:
         # For now, a generic public summary + action_details from ST LLM.
         game_state_summary_for_agent = self._get_public_game_state_summary(f"Storyteller request: {action_type}")
         # Add specific details from the ST LLM's request
-        game_state_summary_for_agent.update(action_details) 
+        game_state_summary_for_agent.update(action_details)
+        #inject canonical list of available actions for this request
+        game_state_summary_for_agent["available_actions"] = self.get_available_actions(player_id, action_type)
         # Add full daily chat log as PlayerAgents expect it
         game_state_summary_for_agent["daily_chat_log"] = list(self._daily_chat_log)
         game_state_summary_for_agent["all_players_details"] = [
@@ -351,7 +366,13 @@ class GameManager:
 
         elif command_type == "SEND_PERSONAL_MESSAGE":
             if "player_id" in params and "message_type" in params and "payload" in params:
-                await self.send_personal_message(params["player_id"], params["message_type"], params["payload"])
+                #deliver private-night info to ai agents' memory
+                ai_id = params["player_id"]
+                msg_type = params["message_type"]
+                data = params["payload"]
+                if ai_id in self.agents and msg_type == "PRIVATE_NIGHT_INFO":
+                    self.agents[ai_id].update_memory("PRIVATE_NIGHT_INFO", data)
+                await self.send_personal_message(ai_id, msg_type, data)
             else:
                 print(f"SEND_PERSONAL_MESSAGE Error: Missing player_id, message_type, or payload: {params}")
 

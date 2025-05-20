@@ -102,7 +102,11 @@ class PlayerAgent(BaseAgent):
                     log_sender = log_entry.get("sender_name", log_entry.get("sender"))
                     prompt += f"    {log_sender}: {log_entry.get('text')}\n"
             prompt += "----\n"
-
+        #include available actions if provided
+        available_actions = game_state.get("available_actions")
+        if available_actions:
+            prompt += "\navailable actions:\n"
+            prompt += f"  {', '.join(available_actions)}\n"
         if additional_context:
             prompt += "\nSpecific Task Context:\n"
             prompt += additional_context + "\n"
@@ -252,7 +256,8 @@ class PlayerAgent(BaseAgent):
             "Encourage transparency: if you have pertinent information or reasoning, share it publicly.\n"
             "If any player has been notably silent or hasn't explained their thoughts, consider politely calling out their silence as suspicious.\n"
             "Based on all this, formulate your chat message. It should be in character.\n"
-            "If you genuinely have nothing to add or prefer to remain silent, respond with the exact word: SILENT"
+            "If you genuinely have nothing to add or prefer to remain silent, respond with the exact word: SILENT.\n"
+            "If the discussion has stalled or no one has contributed new information for a while, consider explicitly revealing your role and provide supporting evidence by describing your ability and any private clues you have to prove your claim.\n"
         )
 
         # _build_prompt_context will use game_state["daily_chat_log"] which should be comprehensive
