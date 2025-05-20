@@ -34,10 +34,13 @@ html = """
             .chat-message { background-color: #e1f5fe; }
             .game-event { background-color: #fff9c4; }
             .error-message { background-color: #ffcdd2; color: #c62828; }
-            /* collapsible panels */
-            details { display: flex; flex-direction: column; flex-grow: 1; overflow: hidden; margin-bottom: 10px; }
-            details > summary { cursor: pointer; padding: 4px; font-weight: bold; background-color: #eee; }
-            details > ul { margin: 0; flex-grow: 1; overflow-y: auto; }
+            /* tabs styling */
+            .tabs { display: flex; border-bottom: 1px solid #ccc; margin-bottom: 10px; }
+            .tab-button { flex: 1; padding: 8px; background: none; border: none; cursor: pointer; transition: background-color 0.3s; }
+            .tab-button:hover { background-color: #eee; }
+            .tab-button.active { border-bottom: 2px solid #5cb85c; color: #5cb85c; font-weight: bold; }
+            .tab-contents { display: flex; flex-direction: column; flex-grow: 1; overflow: auto; }
+            .tab-content { flex-grow: 1; overflow-y: auto; }
             .info-message { background-color: #c8e6c9; }
             .storyteller-message { background-color: #d1c4e9; } /* Storyteller messages color */
             .connection-bar { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; }
@@ -52,14 +55,18 @@ html = """
         </div>
         <div class="container">
             <div class="main-content">
-                <details open>
-                  <summary>Storyteller Log & Game Events</summary>
-                  <ul id="storytellerLog"></ul>
-                </details>
-                <details open>
-                  <summary>AI Player Chat</summary>
-                  <ul id="messages"></ul>
-                </details>
+                <div class="tabs">
+                  <button class="tab-button active" data-target="storyteller">Storyteller Log & Game Events</button>
+                  <button class="tab-button" data-target="chat">AI Player Chat</button>
+                </div>
+                <div class="tab-contents">
+                  <div id="storyteller" class="tab-content">
+                    <ul id="storytellerLog"></ul>
+                  </div>
+                  <div id="chat" class="tab-content" style="display:none;">
+                    <ul id="messages"></ul>
+                  </div>
+                </div>
             </div>
             <div class="sidebar">
                 <h2>Player Roles</h2>
@@ -183,6 +190,19 @@ html = """
             
             // Removed sendMessage function as observer does not send chat.
             // If you need to send other specific commands for testing, add new functions like requestGameStart.
+            // tab switching logic
+            document.addEventListener('DOMContentLoaded', function() {
+                const tabButtons = document.querySelectorAll('.tab-button');
+                tabButtons.forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        tabButtons.forEach(b => b.classList.remove('active'));
+                        document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+                        this.classList.add('active');
+                        const target = this.getAttribute('data-target');
+                        document.getElementById(target).style.display = 'block';
+                    });
+                });
+            });
         </script>
     </body>
 </html>

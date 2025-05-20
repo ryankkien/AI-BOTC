@@ -49,8 +49,6 @@
 .chat-panel {
   border: 1px solid lightgreen;
   padding: 10px;
-  height: 300px;
-  overflow-y: scroll;
 }
 
 .private-info-panel {
@@ -74,21 +72,26 @@
 .tabs-header {
   display: flex;
   margin-bottom: 10px;
+  border-bottom: 1px solid #ccc;
 }
 .tabs-header button {
   flex: 1;
-  padding: 8px;
-  background-color: #eee;
-  border: 1px solid #ccc;
-  border-bottom: none;
+  padding: 10px;
+  background: none;
+  border: none;
   cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+.tabs-header button:hover {
+  background-color: #ddd;
 }
 .tabs-header button.active-tab {
-  background-color: #fff;
+  border-bottom: 2px solid #5cb85c;
+  color: #5cb85c;
   font-weight: bold;
-  border-bottom: 1px solid #fff;
 }
 .tabs-content {
+  display: flex;
+  flex-direction: column;
   flex-grow: 1;
-  overflow-y: auto;
 } 

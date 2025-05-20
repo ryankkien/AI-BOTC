@@ -143,6 +143,25 @@ function App() {
     }
   };
 
+  // start game request logic
+  const requestGameStart = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "REQUEST_GAME_START" }));
+    } else {
+      console.log("Socket not connected or not open.");
+    }
+  };
+
+  const startButtonStyle = {
+    margin: '5px 0',
+    padding: '10px 15px',
+    border: '1px solid #ccc',
+    backgroundColor: '#5cb85c',
+    color: 'white',
+    cursor: 'pointer',
+    borderRadius: '5px'
+  };
+
   return (
     <div className="App">
       <header className="App-header">
@@ -166,6 +185,7 @@ function App() {
           </div>
         </div>
         <div className="side-panel">
+          <button onClick={requestGameStart} style={startButtonStyle}>Start 10-AI Player Game</button>
           <PrivateInfoPanel info={privateInfo} />
           <Controls 
             gameState={gameState} 
