@@ -7,6 +7,7 @@ import random #for shuffling roles if needed
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse #for testing
 from typing import Dict, List, Any, Optional
+from datetime import datetime
 
 from .storyteller.grimoire import Grimoire
 from .storyteller.rules import RuleEnforcer
@@ -973,6 +974,20 @@ async def websocket_endpoint(websocket: WebSocket, player_id: str):
 
         print(f"Error in WebSocket connection for {player_id}: OriginalExceptionType={err_type_name}, OriginalArgs={err_args_str}, OriginalReprAttempt={err_repr_str}, Scope={scope_info}")
         game_manager.disconnect(player_id)
+
+#add endpoint to save game logs chronologically in a json file
+@app.get("/save_logs")
+async def save_logs():
+    if not game_manager.grimoire:
+        return {"error":"no game in progress to save logs"}
+    sorted_logs=sorted(game_manager.grimoire.game_log,key=lambda e:e["timestamp"])
+    #create logs directory if not exists
+    os.makedirs("logs",exist_ok=True)
+    filename=datetime.utcnow().strftime("game_log_%Y%m%d_%H%M%S.json")
+    filepath=os.path.join("logs",filename)
+    with open(filepath,"w") as f:
+        json.dump(sorted_logs,f,indent=2)
+    return {"message":"logs saved successfully","filepath":filepath}
 
 if __name__ == "__main__":
     print("Starting game server on http://localhost:8000")

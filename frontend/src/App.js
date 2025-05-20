@@ -152,6 +152,23 @@ function App() {
     }
   };
 
+  //add function to save logs by calling backend endpoint
+  const handleSaveLogs = () => {
+    fetch("http://localhost:8000/save_logs")
+      .then(res => res.json())
+      .then(data => {
+        if(data.error) {
+          alert("error saving logs: " + data.error);
+        } else {
+          alert("logs saved at: " + data.filepath);
+        }
+      })
+      .catch(err => {
+        console.error("error saving logs:", err);
+        alert("error saving logs: " + err);
+      });
+  };
+
   const startButtonStyle = {
     margin: '5px 0',
     padding: '10px 15px',
@@ -186,6 +203,7 @@ function App() {
         </div>
         <div className="side-panel">
           <button onClick={requestGameStart} style={startButtonStyle}>Start 10-AI Player Game</button>
+          <button onClick={handleSaveLogs} style={startButtonStyle}>Save Game Logs</button>
           <PrivateInfoPanel info={privateInfo} />
           <Controls 
             gameState={gameState} 
