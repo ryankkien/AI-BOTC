@@ -53,6 +53,7 @@ html = """
             Player ID (Observer): <input type="text" id="observerId" value="ObserverClient"/>
             <button onclick="connectWs()">Connect</button>
             <button onclick="requestGameStart()">Start 10-AI Player Game</button>
+            <button onclick="saveLogs()">Save Logs</button>
         </div>
         <div class="container">
             <div class="main-content">
@@ -187,6 +188,22 @@ html = """
                 }
                 ws.send(JSON.stringify({ type: "REQUEST_GAME_START" }));
                 addMessageToList(storytellerLog, "Requested 10-AI player game start.", "info-message");
+            }
+            
+            //implement save_logs button functionality
+            function saveLogs() {
+                fetch('/save_logs')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            addMessageToList(storytellerLog, 'ERROR: ' + data.error, 'error-message');
+                        } else {
+                            addMessageToList(storytellerLog, 'INFO: logs saved at ' + data.filepath, 'info-message');
+                        }
+                    })
+                    .catch(error => {
+                        addMessageToList(storytellerLog, 'ERROR: error saving logs: ' + error, 'error-message');
+                    });
             }
             
             // Removed sendMessage function as observer does not send chat.
@@ -579,13 +596,13 @@ class GameManager:
     async def send_personal_message(self, player_id: str, message_type: str, payload: Any):
         if player_id in self.active_connections:
             try:
-                await self.active_connections[player_id].send_text(json.dumps({"type": message_type, "payload": payload, "to":player_id}))
+                await self.active_connections[player_id].send_text(json.dumps({"type": message_type, "payload": payload, "playerId": player_id}))
             except json.JSONDecodeError as je:
-                print(f"JSON ENCODE Error sending personal message to {player_id}: {je}") # Should not happen with json.dumps, but for completeness
+                print(f"json encode error sending personal message to {player_id}: {je}")
             except KeyError as ke_send_personal:
-                 print(f"KEYERROR sending personal message to {player_id}: {repr(ke_send_personal)}")
+                print(f"keyerror sending personal message to {player_id}: {repr(ke_send_personal)}")
             except Exception as e:
-                print(f"Error sending personal message to {player_id}: {type(e).__name__} - {e}")
+                print(f"error sending personal message to {player_id}: {type(e).__name__} - {e}")
                 #self.disconnect(player_id) #disconnecting here might be too aggressive
 
     async def broadcast_message(self, message_type: str, payload: Any, exclude_player_ids: List[str] = []):
@@ -656,10 +673,22 @@ class GameManager:
             "role": role,
             "alignment": alignment,
             "description": role_details.get("description", ""),
-            "clues": self.grimoire.statuses.get(player_id,{}).get("private_clues",[]), #try to get existing clues
+            "clues": self.grimoire.get_private_clues(player_id),
         }
-        #demon/minion specific info is usually sent via rule_enforcer during _resolve_first_night_info
-        #this method can be used for on-connect refresh or other private updates
+        #provide demon identification to roles that know the demon
+        if role_details.get("knows_demon", False):
+            demon_ids = [pid for pid, r in self.grimoire.roles.items() if r == "Imp"]
+            if demon_ids:
+                private_payload["known_demon"] = demon_ids[0]
+        #provide minion identification and bluffs to the demon
+        if role == "Imp":
+            minion_ids = [pid for pid, r in self.grimoire.roles.items() if get_role_details(r)["type"] == RoleType.MINION]
+            private_payload["known_minions"] = minion_ids
+            private_payload["demon_bluffs"] = getattr(self.grimoire, "demon_bluffs", [])
+        #provide fortune teller red herring if applicable
+        if role_details.get("has_red_herring", False):
+            private_payload["red_herring"] = getattr(self.grimoire, "fortune_teller_red_herring", None)
+        #this method sends all private info updates to the player
         await self.send_personal_message(player_id, "PRIVATE_INFO_UPDATE", private_payload)
 
     async def run_game_loop(self):
