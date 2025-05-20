@@ -54,6 +54,13 @@ class Grimoire:
         self.game_log.append(log_entry)
         #self.storyteller_log.append(f"Event: {event_type} - {data}") #more verbose for internal log
         print(f"Event Logged: {log_entry}") #for now, print to console
+        #update phase and day_number in grimoire
+        if event_type == "PHASE_CHANGE":
+            phase = data.get("phase") or data.get("new_phase")
+            if phase:
+                self.current_phase = phase
+            if "day_number" in data:
+                self.day_number = data["day_number"]
 
     def get_player_role(self, player_id: str) -> Optional[str]:
         return self.roles.get(player_id)

@@ -72,6 +72,7 @@ html = """
             const storytellerLog = document.getElementById('storytellerLog');
             const messagesList = document.getElementById('messages');
             const playerRolesList = document.getElementById('playerRoles');
+            var rolesMap = {}; // map of playerId to role for observer display
 
             function addMessageToList(listElement, text, type) {
                 var li = document.createElement('li');
@@ -138,14 +139,12 @@ html = """
                             // Optionally display full game state if needed for debugging
                             // addMessageToList(storytellerLog, JSON.stringify(payload, null, 2), "game-event");
                             break;
-                        case "CHAT_MESSAGE":
-                            const senderName = payload.sender_name || payload.sender;
-                            addMessageToList(messagesList, `${senderName}: ${payload.text}`, "chat-message");
-                            break;
                         case "PLAYER_ROLES_UPDATE": // New message type for roles
+                            rolesMap = {}; // reset roles mapping
                             playerRolesList.innerHTML = ''; // Clear previous roles
                             if (payload.roles && Array.isArray(payload.roles)) {
                                 payload.roles.forEach(player => {
+                                    rolesMap[player.id] = player.role;
                                     addMessageToList(playerRolesList, `${player.name} (${player.id.substring(0,4)}): ${player.role}`, "role-item");
                                 });
                             }
@@ -153,6 +152,12 @@ html = """
                         case "GAME_EVENT": // Generic game event from storyteller
                              addMessageToList(storytellerLog, `STORYTELLER: ${payload.message}`, "storyteller-message");
                              break;
+                        case "CHAT_MESSAGE":
+                            const senderName = payload.sender_name || payload.sender;
+                            const role = rolesMap[payload.sender] || '';
+                            const display = role ? `${senderName} (${role})` : senderName;
+                            addMessageToList(messagesList, `${display}: ${payload.text}`, "chat-message");
+                            break;
                         default:
                             addMessageToList(storytellerLog, `UNKNOWN [${messageType}]: ${displayText}`, "game-event");
                     }
@@ -231,7 +236,7 @@ class GameManager:
         print(f"Requesting '{action_type}' from AI {player_id} for action_id '{action_id}'...")
 
         try:
-            if action_type == "NIGHT_ACTION": # This assumes a generic night action type from ST LLM
+            if action_type.startswith("NIGHT_ACTION"): # handle any specific night action types
                 # PlayerAgent.get_night_action needs alive_player_ids_with_names
                 alive_players_with_names = [
                     {"id": pid, "name": self.grimoire.game_state.get("player_names", {}).get(pid, pid)}
@@ -378,7 +383,7 @@ class GameManager:
                      # It implies the ST LLM should issue AWAIT just after this for this player/action_id
 
                 # Send a tailored message type based on action_type
-                if action_type == "NIGHT_ACTION":
+                if action_type.startswith("NIGHT_ACTION"):  
                     await self.send_personal_message(player_id, "REQUEST_NIGHT_ACTION", {"action_id": action_id, **action_details})
                 elif action_type == "NOMINATION_CHOICE":
                      await self.send_personal_message(player_id, "REQUEST_NOMINATION", {"action_id": action_id, **action_details})
