@@ -8,6 +8,7 @@ with 10 AI-driven players powered by Google Gemini and a WebSocket-based observe
 - Storyteller enforces game rules, phases, and win conditions
 - AI Agents communicate publicly and privately with rate limiting
 - Observer UI to watch game events and AI chat in real time
+- Detailed rule implementation for various 'Trouble Brewing' roles, including complex interactions like Poisoner effects, Imp promotions, Mayor saves, specific first-night information, and nuanced victory conditions.
 
 ## Prerequisites
 

@@ -13,7 +13,9 @@ class Grimoire:
         self.day_number: int = 0
         self.current_phase: Optional[str] = None #e.g., "FIRST_NIGHT", "DAY_CHAT", "NOMINATION", "VOTING", "NIGHT"
         self.demon_bluffs: List[str] = [] #list of 3 role names given to the demon as bluffs
-        self.fortune_teller_red_herring: Optional[str] = None #player_id picked as red herring
+        self.fortune_teller_red_herring_player_id: Optional[str] = None #player_id picked as red herring
+        self.current_demon_player_id: Optional[str] = None # Tracks the current demon
+        self.baron_added_outsiders: List[str] = [] # Stores names of Outsider roles added by Baron
         self.storyteller_log: List[str] = [] #internal log for storyteller/debug
         self.private_clues: Dict[str, List[Any]] = {} #player_id -> list of private clues
 
@@ -24,13 +26,17 @@ class Grimoire:
         self.alignments[player_id] = alignment
         self.statuses[player_id] = {
             "alive": True,
-            "poisoned": False,
-            "drunk": False,
+            "poisoned": False, # Confirmed: Initialized to False
+            "is_drunk": False, # For the Drunk role
+            "thinks_is_role": None, # For the Drunk role - stores false Townsfolk role
+            "thinks_is_alignment": None, # For the Drunk role - stores false alignment
+            "misregisters_as_role": None, # For the Recluse - stores false role they register as
+            "misregisters_as_alignment": None, # For the Recluse - stores false alignment they register as
             "protected_by_monk": False,
             "nominated_today": False, #has this player been nominated today
             "can_nominate": True, #can this player nominate others today
-            "used_virgin_ability": False,
-            "used_slayer_ability": False,
+            "used_virgin_ability": False, # Confirmed: Initialized to False
+            "used_slayer_ability": False, # Confirmed: Initialized to False
             #add other relevant statuses here
         }
         # initialize private clues list for this player
