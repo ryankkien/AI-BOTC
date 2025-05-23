@@ -21,6 +21,7 @@ ROLES_DATA = {
         "alignment": RoleAlignment.GOOD,
         "description": "You start knowing that one of two players is a particular Townsfolk.",
         "first_night_ability": True,
+        "detailed_first_night_info": True,
         "other_night_ability": False,
         "day_ability": False,
         "affects_setup": True #e.g. for fortune teller red herring selection
@@ -30,6 +31,7 @@ ROLES_DATA = {
         "alignment": RoleAlignment.GOOD,
         "description": "You start knowing that one of two players is a particular Outsider.",
         "first_night_ability": True,
+        "detailed_first_night_info": True,
         "other_night_ability": False,
         "day_ability": False,
         "affects_setup": True
@@ -39,6 +41,7 @@ ROLES_DATA = {
         "alignment": RoleAlignment.GOOD,
         "description": "You start knowing that one of two players is a particular Minion.",
         "first_night_ability": True,
+        "detailed_first_night_info": True,
         "other_night_ability": False,
         "day_ability": False,
         "affects_setup": True
@@ -48,6 +51,7 @@ ROLES_DATA = {
         "alignment": RoleAlignment.GOOD,
         "description": "You start knowing if any two evil players are sitting next to each other.",
         "first_night_ability": True,
+        "detailed_first_night_info": True,
         "other_night_ability": False,
         "day_ability": False
     },
@@ -56,6 +60,7 @@ ROLES_DATA = {
         "alignment": RoleAlignment.GOOD,
         "description": "Each night, you learn how many of your alive neighbors are evil.",
         "first_night_ability": True, #gets a 0, 1, or 2
+        "detailed_first_night_info": True,
         "other_night_ability": True
     },
     "Fortune Teller": {
@@ -121,13 +126,17 @@ ROLES_DATA = {
     "Drunk": {
         "type": RoleType.OUTSIDER,
         "alignment": RoleAlignment.GOOD,
-        "description": "You do not know you are the Drunk. You think you are a Townsfolk, but you are not. You have no ability."
+        "description": "You do not know you are the Drunk. You think you are a Townsfolk, but you are not. You have no ability.",
+        "thinks_is_role": None, # Storyteller will assign a false Townsfolk identity
+        "affects_setup": True
         #special handling: storyteller gives false info
     },
     "Recluse": {
         "type": RoleType.OUTSIDER,
         "alignment": RoleAlignment.GOOD,
-        "description": "You might register as evil, or as a Minion or Demon, even if dead."
+        "description": "You might register as evil, or as a Minion or Demon, even if dead.",
+        "can_misregister_as_evil": True, # ST LLM pre-determines a 'false persona'
+        "affects_setup": True
         #special handling: can confuse Investigator, Fortune Teller, Empath, Undertaker, Ravenkeeper, Slayer
     },
     "Saint": {
