@@ -160,7 +160,7 @@ function App() {
         if(data.error) {
           alert("error saving logs: " + data.error);
         } else {
-          alert("logs saved at: " + data.filepath);
+          alert("Comprehensive logs saved successfully at: " + data.filepath);
         }
       })
       .catch(err => {
@@ -203,7 +203,7 @@ function App() {
         </div>
         <div className="side-panel">
           <button onClick={requestGameStart} style={startButtonStyle}>Start 10-AI Player Game</button>
-          <button onClick={handleSaveLogs} style={startButtonStyle}>Save Game Logs</button>
+          <button onClick={handleSaveLogs} style={startButtonStyle}>Save Comprehensive Logs</button>
           <PrivateInfoPanel info={privateInfo} />
           <Controls 
             gameState={gameState} 

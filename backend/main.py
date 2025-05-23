@@ -53,7 +53,7 @@ html = """
             Player ID (Observer): <input type="text" id="observerId" value="ObserverClient"/>
             <button onclick="connectWs()">Connect</button>
             <button onclick="requestGameStart()">Start 10-AI Player Game</button>
-            <button onclick="saveLogs()">Save Logs</button>
+            <button onclick="saveLogs()">Save Comprehensive Logs</button>
         </div>
         <div class="container">
             <div class="main-content">
@@ -213,7 +213,7 @@ html = """
                         if (data.error) {
                             addMessageToList(storytellerLog, 'ERROR: ' + data.error, 'error-message');
                         } else {
-                            addMessageToList(storytellerLog, 'INFO: logs saved at ' + data.filepath, 'info-message');
+                            addMessageToList(storytellerLog, 'INFO: Comprehensive logs saved successfully at ' + data.filepath, 'info-message');
                         }
                     })
                     .catch(error => {
@@ -250,15 +250,45 @@ class GameManager:
         self.agents: Dict[str, BaseAgent] = {}
         self.active_connections: Dict[str, WebSocket] = {} #player_id to websocket
         self.game_loop_task: Optional[asyncio.Task] = None
+        
+        # LLM configuration - support multiple providers
+        self.llm_provider_type = os.getenv("LLM_PROVIDER", "auto")
+        self.llm_model = os.getenv("LLM_MODEL")
+        
+        # Legacy support for Google API key
         self.google_api_key: Optional[str] = os.getenv("GOOGLE_API_KEY")
+        
+        # Get the appropriate API key based on provider
+        self.api_key = self._get_api_key()
+        
         self.human_player_expected_actions: Dict[str, asyncio.Future] = {} # player_id -> Future for action
         self._game_lock = asyncio.Lock() #to prevent concurrent modifications to game state
         self._game_started_event = asyncio.Event()
         self._current_nominating_player_index: int = 0
         self._nomination_order: List[str] = []
         self._daily_chat_log: List[Dict[str,str]] = [] #to feed to agents for day decisions
-        # initialize LLM-based storyteller
-        self.storyteller_agent = StorytellerAgent(api_key=self.google_api_key, game_manager=self)
+        
+        # initialize LLM-based storyteller with new system
+        self.storyteller_agent = StorytellerAgent(
+            api_key=self.api_key, 
+            game_manager=self, 
+            provider_type=self.llm_provider_type,
+            model=self.llm_model
+        )
+
+    def _get_api_key(self) -> Optional[str]:
+        """Get the appropriate API key based on provider type"""
+        if self.llm_provider_type == "openai" or self.llm_provider_type == "auto":
+            return os.getenv("OPENAI_API_KEY")
+        elif self.llm_provider_type == "anthropic":
+            return os.getenv("ANTHROPIC_API_KEY")
+        elif self.llm_provider_type == "google":
+            return os.getenv("GOOGLE_API_KEY")
+        else:
+            # Try to find any available API key
+            return (os.getenv("OPENAI_API_KEY") or 
+                   os.getenv("ANTHROPIC_API_KEY") or 
+                   os.getenv("GOOGLE_API_KEY"))
 
     def is_game_running(self) -> bool:
         return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set()
@@ -591,11 +621,25 @@ class GameManager:
                 # Initialize PlayerAgent objects
                 if player_id not in human_player_ids:
                     alignment = self.grimoire.get_player_alignment(player_id)
-                    if self.google_api_key:
-                        self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=self.google_api_key, game_manager=self)
-                        print(f"Initialized AI Agent for {display_name} as {actual_role_name} ({alignment})")
+                    if self.api_key:
+                        self.agents[player_id] = PlayerAgent(
+                            player_id, 
+                            actual_role_name, 
+                            alignment, 
+                            api_key=self.api_key, 
+                            game_manager=self,
+                            provider_type=self.llm_provider_type,
+                            model=self.llm_model
+                        )
+                        print(f"Initialized AI Agent for {display_name} as {actual_role_name} ({alignment}) using {self.llm_provider_type} provider")
                     else:
-                        self.agents[player_id] = PlayerAgent(player_id, actual_role_name, alignment, api_key=None, game_manager=self)
+                        self.agents[player_id] = PlayerAgent(
+                            player_id, 
+                            actual_role_name, 
+                            alignment, 
+                            api_key=None, 
+                            game_manager=self
+                        )
                         print(f"Skipping LLM for AI agent {display_name} due to missing API key. Player will be passive.")
                     # populate initial private info into agent.memory
                     agent = self.agents[player_id]
@@ -1092,14 +1136,64 @@ async def websocket_endpoint(websocket: WebSocket, player_id: str):
 async def save_logs():
     if not game_manager.grimoire:
         return {"error":"no game in progress to save logs"}
-    sorted_logs=sorted(game_manager.grimoire.game_log,key=lambda e:e["timestamp"])
-    #create logs directory if not exists
-    os.makedirs("logs",exist_ok=True)
-    filename=datetime.utcnow().strftime("game_log_%Y%m%d_%H%M%S.json")
-    filepath=os.path.join("logs",filename)
-    with open(filepath,"w") as f:
-        json.dump(sorted_logs,f,indent=2)
-    return {"message":"logs saved successfully","filepath":filepath}
+    
+    # Collect all comprehensive game data
+    comprehensive_logs = {
+        "metadata": {
+            "save_timestamp": datetime.utcnow().isoformat(),
+            "game_phase": game_manager.grimoire.current_phase,
+            "day_number": game_manager.grimoire.day_number,
+            "players_count": len(game_manager.grimoire.players),
+            "game_started": game_manager._game_started_event.is_set()
+        },
+        "game_log": sorted(game_manager.grimoire.game_log, key=lambda e: e["timestamp"]),
+        "storyteller_log": game_manager.grimoire.storyteller_log,
+        "daily_chat_log": game_manager._daily_chat_log,
+        "game_state": {
+            "players": game_manager.grimoire.players,
+            "roles": game_manager.grimoire.roles,
+            "alignments": game_manager.grimoire.alignments,
+            "statuses": game_manager.grimoire.statuses,
+            "demon_bluffs": game_manager.grimoire.demon_bluffs,
+            "fortune_teller_red_herring_player_id": game_manager.grimoire.fortune_teller_red_herring_player_id,
+            "current_demon_player_id": game_manager.grimoire.current_demon_player_id,
+            "baron_added_outsiders": game_manager.grimoire.baron_added_outsiders,
+            "private_clues": game_manager.grimoire.private_clues,
+            "general_game_state": game_manager.grimoire.game_state
+        },
+        "agent_memories": {},
+        "storyteller_agent_data": {
+            "prompts": getattr(game_manager.storyteller_agent, 'debug_prompts', []),
+            "responses": getattr(game_manager.storyteller_agent, 'debug_responses', [])
+        },
+        "pending_actions": getattr(game_manager, 'pending_storyteller_actions', {}),
+        "nomination_state": {
+            "current_nominating_player_index": game_manager._current_nominating_player_index,
+            "nomination_order": game_manager._nomination_order
+        }
+    }
+    
+    # Collect agent memories and debug data
+    for player_id, agent in game_manager.agents.items():
+        agent_data = {
+            "memory": agent.memory,
+            "role": agent.role,
+            "alignment": agent.alignment,
+            "status": agent.status,
+            "debug_prompts": getattr(agent, 'debug_prompts', []),
+            "debug_responses": getattr(agent, 'debug_responses', [])
+        }
+        comprehensive_logs["agent_memories"][player_id] = agent_data
+    
+    # Create logs directory if not exists
+    os.makedirs("logs", exist_ok=True)
+    filename = datetime.utcnow().strftime("comprehensive_game_log_%Y%m%d_%H%M%S.json")
+    filepath = os.path.join("logs", filename)
+    
+    with open(filepath, "w") as f:
+        json.dump(comprehensive_logs, f, indent=2, default=str)
+    
+    return {"message": "comprehensive logs saved successfully", "filepath": filepath}
 
 if __name__ == "__main__":
     print("Starting game server on http://localhost:8000")

@@ -1,46 +1,63 @@
 #backend/agents/player_agent.py
-import google.generativeai as genai
 import os
-from dotenv import load_dotenv #import load_dotenv
+from dotenv import load_dotenv
 from typing import Dict, List, Any, Optional
 from .base_agent import BaseAgent
-from ..storyteller.roles import ROLES_DATA, RoleAlignment #added RoleAlignment
+from ..storyteller.roles import ROLES_DATA, RoleAlignment
+from ..llm_providers import LLMFactory, UnifiedLLMClient, global_rate_limit
 import time
 import asyncio
 
-load_dotenv() #load environment variables from .env
-
-#configure the genai api key
-#genai.configure(api_key=os.getenv("GOOGLE_API_KEY")) #this will be done in init
+load_dotenv()
 
 #global variables for rate limiting across all playeragent instances
 _last_global_llm_call_time: float = None
 _llm_rate_limit_lock = asyncio.Lock()
 
 class PlayerAgent(BaseAgent):
-    def __init__(self, player_id: str, role: str, alignment: str, api_key: Optional[str] = None, game_manager: Optional[Any] = None): # Added game_manager
+    def __init__(self, player_id: str, role: str, alignment: str, api_key: Optional[str] = None, game_manager: Optional[Any] = None, provider_type: Optional[str] = None, model: Optional[str] = None):
         super().__init__(player_id, role, alignment)
         self.llm = None
-        self.game_manager = game_manager # Store game_manager
+        self.game_manager = game_manager
         
-        #load api_key from .env if not provided directly
-        #prioritize passed api_key, then .env, then nothing
-        effective_api_key = api_key if api_key else os.getenv("GOOGLE_API_KEY")
-
-        if effective_api_key:
-            genai.configure(api_key=effective_api_key)
-        else:
-            print(f"Warning: No API key provided or found in .env for PlayerAgent {player_id}. LLM will not be initialized.")
-        
-        #use a model appropriate for chat and reasoning, e.g., gemini-1.5-flash
-        #make sure the model name is up-to-date with available models
+        # Create LLM provider using the factory
         try:
-            if effective_api_key: #only attempt to create model if api key was provided
-                self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
+            # Determine which API key to use based on provider type
+            effective_api_key = api_key
+            if not effective_api_key:
+                # Auto-detect API key based on provider type or available keys
+                provider_type = provider_type or os.getenv("LLM_PROVIDER", "auto")
+                if provider_type == "openai" or provider_type == "auto":
+                    effective_api_key = os.getenv("OPENAI_API_KEY")
+                elif provider_type == "anthropic":
+                    effective_api_key = os.getenv("ANTHROPIC_API_KEY")
+                elif provider_type == "google":
+                    effective_api_key = os.getenv("GOOGLE_API_KEY")
+                else:
+                    # Try to find any available API key
+                    effective_api_key = (os.getenv("OPENAI_API_KEY") or 
+                                        os.getenv("ANTHROPIC_API_KEY") or 
+                                        os.getenv("GOOGLE_API_KEY"))
+            
+            if effective_api_key:
+                # Create the LLM provider
+                provider = LLMFactory.create_provider(
+                    provider_type=provider_type,
+                    api_key=effective_api_key,
+                    model=model
+                )
+                
+                # Wrap it in our unified client
+                self.llm = UnifiedLLMClient(provider, game_manager)
+                self.llm.set_agent_id(player_id)
+                
+                print(f"Initialized LLM for {player_id} using {type(provider).__name__} with model {provider.model}")
             else:
+                print(f"Warning: No API key found for PlayerAgent {player_id}. LLM will not be initialized.")
                 self.llm = None
+                
         except Exception as e:
-            print(f"Failed to initialize GenerativeModel for {player_id}: {e}")
+            print(f"Failed to initialize LLM for {player_id}: {e}")
             self.llm = None
             
         self.role_details = ROLES_DATA.get(self.role, {})
@@ -117,29 +134,13 @@ class PlayerAgent(BaseAgent):
         return prompt
 
     async def _rate_limited_generate(self, *args, **kwargs):
-        global _last_global_llm_call_time
-        #global rate limiting across all agents to respect rate limits
-        min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
-        async with _llm_rate_limit_lock:
-            now = time.monotonic()
-            if _last_global_llm_call_time is not None:
-                elapsed = now - _last_global_llm_call_time
-                if elapsed < min_interval:
-                    await asyncio.sleep(min_interval - elapsed)
-            prompt_text = args[0] if args else ""
-            try:
-                if self.game_manager:
-                    await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "prompt": prompt_text})
-            except Exception:
-                pass
-            response = await self.llm.generate_content_async(*args, **kwargs)
-            _last_global_llm_call_time = time.monotonic()
-            try:
-                if self.game_manager:
-                    await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": self.player_id, "response": response.text})
-            except Exception:
-                pass
-            return response
+        """Generate content with rate limiting using the new unified LLM system"""
+        # Use the global rate limiting from the new LLM system
+        await global_rate_limit()
+        
+        # The UnifiedLLMClient already handles debug logging, so we just call it directly
+        response = await self.llm.generate_content_async(*args, **kwargs)
+        return response
 
     async def get_night_action(self, game_state: Dict[str, Any], alive_player_ids_with_names: List[Dict[str,str]]) -> Optional[Dict[str, Any]]:
         if not self.llm or not self.status["alive"]:

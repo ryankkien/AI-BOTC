@@ -1,21 +1,52 @@
 import os
 import json
-import google.generativeai as genai
 from typing import Any
 import time
 import asyncio
+from ..llm_providers import LLMFactory, UnifiedLLMClient, global_rate_limit
 
 class StorytellerAgent:
-    def __init__(self, api_key: str = None, game_manager: Any = None):
+    def __init__(self, api_key: str = None, game_manager: Any = None, provider_type: str = None, model: str = None):
         self.game_manager = game_manager
-        self._last_llm_call_time = None  # initialize last call timestamp
-        # configure the LLM for narrative duties
-        effective_api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        if effective_api_key:
-            genai.configure(api_key=effective_api_key)
-            self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
-        else:
-            print("warning: GOOGLE_API_KEY not set, storyteller llm unavailable")
+        
+        # Create LLM provider using the factory
+        try:
+            # Determine which API key to use based on provider type
+            effective_api_key = api_key
+            if not effective_api_key:
+                # Auto-detect API key based on provider type or available keys
+                provider_type = provider_type or os.getenv("LLM_PROVIDER", "auto")
+                if provider_type == "openai" or provider_type == "auto":
+                    effective_api_key = os.getenv("OPENAI_API_KEY")
+                elif provider_type == "anthropic":
+                    effective_api_key = os.getenv("ANTHROPIC_API_KEY")
+                elif provider_type == "google":
+                    effective_api_key = os.getenv("GOOGLE_API_KEY")
+                else:
+                    # Try to find any available API key
+                    effective_api_key = (os.getenv("OPENAI_API_KEY") or 
+                                        os.getenv("ANTHROPIC_API_KEY") or 
+                                        os.getenv("GOOGLE_API_KEY"))
+            
+            if effective_api_key:
+                # Create the LLM provider
+                provider = LLMFactory.create_provider(
+                    provider_type=provider_type,
+                    api_key=effective_api_key,
+                    model=model
+                )
+                
+                # Wrap it in our unified client
+                self.llm = UnifiedLLMClient(provider, game_manager)
+                self.llm.set_agent_id("storyteller")
+                
+                print(f"Initialized Storyteller LLM using {type(provider).__name__} with model {provider.model}")
+            else:
+                print("Warning: No API key found for Storyteller. LLM will not be initialized.")
+                self.llm = None
+                
+        except Exception as e:
+            print(f"Failed to initialize Storyteller LLM: {e}")
             self.llm = None
 
         # master system prompt for the Storyteller
@@ -109,30 +140,16 @@ GENERAL GUIDELINES
                  return [{"command": "LOG_EVENT", "params": {"event_type": "ST_INFO", "data": "LLM N/A, basic game start triggered."}}]
             return []
 
-
         prompt = self.system_prompt + "\n\nCURRENT CONTEXT:\n"
         prompt += "\n".join(context_lines)
         prompt += "\n\nStoryteller, provide your JSON list of commands based on the above context and your rules:"
 
-        if self.game_manager:
-            await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "prompt": prompt})
-
-        # throttle LLM calls to respect free-tier rate limits (10 RPM => 6s interval)
-        min_interval = float(os.getenv("LLM_MIN_INTERVAL", "6.0"))
-        now = time.monotonic()
-        if self._last_llm_call_time is not None:
-            elapsed = now - self._last_llm_call_time
-            if elapsed < min_interval:
-                await asyncio.sleep(min_interval - elapsed)
+        # Use the global rate limiting from the new LLM system
+        await global_rate_limit()
 
         try:
             response = await self.llm.generate_content_async(prompt)
-            # record timestamp after LLM call
-            self._last_llm_call_time = time.monotonic()
-            if self.game_manager:
-                await self.game_manager.broadcast_message("LLM_DEBUG", {"agent": "storyteller", "response": response.text})
             raw_response_text = response.text.strip()
-            # print(f"--- STORYTELLER RAW RESPONSE START ---\\n{raw_response_text}\\n--- STORYTELLER RAW RESPONSE END ---") # For debugging
             
             # Attempt to find the JSON list within the response, even if there's preamble/postamble
             json_start_index = raw_response_text.find('[')
