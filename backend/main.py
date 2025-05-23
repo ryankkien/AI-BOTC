@@ -585,7 +585,11 @@ class GameManager:
             setup_commands = await self.storyteller_agent.generate_commands(initial_context)
             print(f"Received setup commands from Storyteller LLM: {setup_commands}")
 
-            for command_obj in setup_commands:
+            # Separate state mutation commands from personal message commands to defer private info until agents exist
+            state_commands = [cmd for cmd in setup_commands if cmd.get("command") != "SEND_PERSONAL_MESSAGE"]
+            deferred_private_msgs = [cmd for cmd in setup_commands if cmd.get("command") == "SEND_PERSONAL_MESSAGE"]
+            # First, apply all state-changing commands
+            for command_obj in state_commands:
                 await self.execute_storyteller_command(command_obj)
             
             # --- The following player agent setup remains, as ST LLM doesn't directly init Python objects ---
@@ -664,6 +668,10 @@ class GameManager:
                 else:
                      print(f"Player {display_name} ({actual_role_name}) is a human player.")
             # --- End of PlayerAgent setup ---
+            
+            # Replay deferred personal messages now that agents and clients are ready
+            for command_obj in deferred_private_msgs:
+                await self.execute_storyteller_command(command_obj)
             
             # Final broadcasts after ST LLM setup and Agent init
             await self.broadcast_player_roles(all_player_role_info) # Broadcast all roles based on Grimoire
