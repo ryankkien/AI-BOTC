@@ -45,6 +45,7 @@ html = """
             .info-message { background-color: #c8e6c9; }
             .storyteller-message { background-color: #d1c4e9; } /* Storyteller messages color */
             .connection-bar { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; }
+            .role-item.selected { background-color: #007bff; color: white; font-weight: bold; }
             h1, h2, h3 { margin-top: 0; }
         </style>
     </head>
@@ -73,8 +74,8 @@ html = """
             <div class="sidebar">
                 <h2>Player Roles</h2>
                 <ul id="playerRoles"></ul>
-                <h2>Memory</h2>
-                <div id="memoryPanel" style="white-space: pre-wrap; border:1px solid #eee; padding:5px; flex-grow:1; overflow-y:auto;"></div>
+                <h2 id="memoryHeader">Player Perspective</h2>
+                <div id="memoryPanel" style="border:1px solid #eee; padding:5px; flex-grow:1; overflow-y:auto;">Click on a player role to see their perspective</div>
             </div>
         </div>
 
@@ -84,6 +85,103 @@ html = """
             const messagesList = document.getElementById('messages');
             const playerRolesList = document.getElementById('playerRoles');
             var rolesMap = {}; // map of playerId to role for observer display
+
+            function formatPlayerPerspective(perspective) {
+                if (perspective.error) {
+                    return `<div style="color: red;">Error: ${perspective.error}</div>`;
+                }
+                
+                let html = '';
+                
+                // Player Info
+                const player = perspective.player_info;
+                html += `<h3>${player.name} (${player.id})</h3>`;
+                html += `<p><strong>Role:</strong> ${player.role}</p>`;
+                html += `<p><strong>Alignment:</strong> ${player.alignment}</p>`;
+                html += `<p><strong>Status:</strong> ${JSON.stringify(player.status)}</p>`;
+                
+                // Private Information
+                const privateInfo = perspective.private_information;
+                html += `<h4>🔒 Private Information</h4>`;
+                html += `<p><strong>Role Ability:</strong> ${privateInfo.role_ability}</p>`;
+                if (privateInfo.storyteller_told_me) {
+                    html += `<p><strong>Storyteller told me:</strong> ${privateInfo.storyteller_told_me}</p>`;
+                }
+                if (privateInfo.private_clues && privateInfo.private_clues.length > 0) {
+                    html += `<p><strong>Private clues:</strong></p><ul>`;
+                    privateInfo.private_clues.forEach(clue => {
+                        html += `<li>${clue}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                
+                // My Actions
+                const actions = perspective.my_actions;
+                html += `<h4>⚡ My Actions</h4>`;
+                if (actions.votes_cast && actions.votes_cast.length > 0) {
+                    html += `<p><strong>Votes cast:</strong></p><ul>`;
+                    actions.votes_cast.forEach(vote => {
+                        html += `<li>${JSON.stringify(vote)}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                if (actions.nominations_made && actions.nominations_made.length > 0) {
+                    html += `<p><strong>Nominations made:</strong></p><ul>`;
+                    actions.nominations_made.forEach(nom => {
+                        html += `<li>${JSON.stringify(nom)}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                if (actions.actions_taken && actions.actions_taken.length > 0) {
+                    html += `<p><strong>Actions taken:</strong></p><ul>`;
+                    actions.actions_taken.forEach(action => {
+                        html += `<li>${JSON.stringify(action)}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                
+                // My Observations
+                const observations = perspective.my_observations;
+                html += `<h4>👁️ My Observations</h4>`;
+                if (observations.important_events && observations.important_events.length > 0) {
+                    html += `<p><strong>Important events:</strong></p><ul>`;
+                    observations.important_events.forEach(event => {
+                        html += `<li>${event}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                if (observations.observations && observations.observations.length > 0) {
+                    html += `<p><strong>Other observations:</strong></p><ul>`;
+                    observations.observations.forEach(obs => {
+                        html += `<li>${obs}</li>`;
+                    });
+                    html += `</ul>`;
+                }
+                
+                // Communications
+                const comms = perspective.communications;
+                html += `<h4>💬 Communications</h4>`;
+                if (comms.private_conversations && Object.keys(comms.private_conversations).length > 0) {
+                    html += `<p><strong>Private conversations:</strong></p>`;
+                    Object.entries(comms.private_conversations).forEach(([partnerName, convo]) => {
+                        html += `<details><summary>With ${partnerName}</summary>`;
+                        html += `<ul>`;
+                        convo.messages.forEach(msg => {
+                            html += `<li><strong>${msg.sender_name}:</strong> ${msg.text} <em>(${msg.timestamp})</em></li>`;
+                        });
+                        html += `</ul></details>`;
+                    });
+                }
+                
+                // Game Context
+                const context = perspective.game_context;
+                html += `<h4>🎮 Game Context</h4>`;
+                html += `<p><strong>Phase:</strong> ${context.current_phase}</p>`;
+                html += `<p><strong>Day:</strong> ${context.day_number}</p>`;
+                html += `<p><strong>Players alive:</strong> ${context.players_alive}/${context.total_players}</p>`;
+                
+                return html;
+            }
 
             function addMessageToList(listElement, text, type) {
                 var li = document.createElement('li');
@@ -162,6 +260,10 @@ html = """
                                     li.dataset.playerId = player.id;
                                     li.style.cursor = 'pointer';
                                     li.addEventListener('click', () => {
+                                        // Remove selection from all other roles
+                                        document.querySelectorAll('.role-item').forEach(item => item.classList.remove('selected'));
+                                        // Add selection to clicked role
+                                        li.classList.add('selected');
                                         ws.send(JSON.stringify({ type: 'REQUEST_MEMORY', payload: { player_id: player.id } }));
                                     });
                                     playerRolesList.appendChild(li);
@@ -179,8 +281,11 @@ html = """
                             break;
                         case "MEMORY_UPDATE":
                             const memPid = payload.player_id;
-                            const mem = payload.memory;
-                            document.getElementById('memoryPanel').textContent = JSON.stringify(mem, null, 2);
+                            const perspective = payload.perspective;
+                            document.getElementById('memoryPanel').innerHTML = formatPlayerPerspective(perspective);
+                            // Update header to show whose perspective this is
+                            const playerName = perspective.player_info ? perspective.player_info.name : memPid;
+                            document.getElementById('memoryHeader').textContent = `${playerName}'s Perspective`;
                             break;
                         default:
                             addMessageToList(storytellerLog, `UNKNOWN [${messageType}]: ${displayText}`, "game-event");
@@ -553,7 +658,7 @@ class GameManager:
         else:
             print(f"GameManager Error: Unknown Storyteller command_type: {command_type}")
 
-    async def setup_new_game(self, player_ids_roles: Dict[str, str], human_player_ids: List[str] = []):
+    async def setup_new_game(self, player_ids_roles: Dict[str, str], human_player_ids: List[str] = [], player_names: Dict[str, str] = {}):
         async with self._game_lock:
             if self.is_game_running() and self.game_loop_task and not self.game_loop_task.done():
                 print("Game is already running. Cannot setup a new game.")
@@ -612,11 +717,17 @@ class GameManager:
                     # This is a fallback, ideally ST LLM handles all additions via commands
                     alignment = get_role_details(role_name)["alignment"].value if get_role_details(role_name) else "Unknown"
                     self.grimoire.add_player(player_id, role_name, alignment)
-                    # Also ensure name is set if ST LLM missed it
-                    if player_id not in player_display_names:
-                        player_display_names[player_id] = f"AI Player ({player_id[:4]})" # Generic name
-                        self.grimoire.game_state.setdefault("player_names", {})[player_id] = player_display_names[player_id]
                 
+                # Set player name from provided mapping or use a better fallback
+                if player_id not in player_display_names:
+                    if player_id in player_names:
+                        # Use the provided random name
+                        player_display_names[player_id] = player_names[player_id]
+                    else:
+                        # Better fallback than generic "AI Player"
+                        player_display_names[player_id] = f"Player {player_id[-1]}"  # Use last character of ID
+                    self.grimoire.game_state.setdefault("player_names", {})[player_id] = player_display_names[player_id]
+
                 # Populate role info for observer using grimoire's state
                 actual_role_name = self.grimoire.get_player_role(player_id)
                 display_name = player_display_names.get(player_id, player_id)
@@ -1038,14 +1149,23 @@ class GameManager:
 
         if msg_type == "REQUEST_GAME_START":
             # start a default 10-AI player game with random roles
-            default_player_ids = [f"AI_Player_{i}" for i in range(1, 11)]
+            num_players = 10
+            default_player_ids = [f"AI_Player_{i}" for i in range(1, num_players + 1)]
+            
+            # Generate random names for the AI players
+            random_names = generate_random_player_names(num_players)
+            
             # assign random roles to AI players
             available_roles = list(ROLES_DATA.keys())
             random.shuffle(available_roles)
             # take as many roles as players
             selected_roles = available_roles[:len(default_player_ids)]
             player_ids_roles = {pid: selected_roles[i] for i, pid in enumerate(default_player_ids)}
-            await self.setup_new_game(player_ids_roles, human_player_ids=[])
+            
+            # Create a mapping of player IDs to random names
+            player_names_mapping = {pid: random_names[i] for i, pid in enumerate(default_player_ids)}
+            
+            await self.setup_new_game(player_ids_roles, human_player_ids=[], player_names=player_names_mapping)
 
         elif msg_type == "CHAT_MESSAGE":
             # record and broadcast public chat from human
@@ -1067,13 +1187,69 @@ class GameManager:
         elif msg_type == "REQUEST_MEMORY":
             requested = payload.get("player_id")
             if requested in self.agents:
-                memory = self.agents[requested].memory
-                await self.send_personal_message(player_id, "MEMORY_UPDATE", {"player_id": requested, "memory": memory})
+                # Get individual player perspective instead of raw memory
+                player_perspective = self._get_player_perspective(requested)
+                await self.send_personal_message(player_id, "MEMORY_UPDATE", {"player_id": requested, "perspective": player_perspective})
             else:
                 print(f"REQUEST_MEMORY for unknown player {requested}")
 
         else:
             print(f"unknown message type from {player_id}: {msg_type}")
+
+    def _get_player_perspective(self, player_id: str) -> Dict[str, Any]:
+        """Get a formatted view of the game from a specific player's perspective"""
+        if player_id not in self.agents:
+            return {"error": f"Player {player_id} not found"}
+        
+        agent = self.agents[player_id]
+        player_info = self.grimoire.players.get(player_id, {})
+        
+        perspective = {
+            "player_info": {
+                "id": player_id,
+                "name": player_info.get("name", player_id),
+                "role": agent.role,
+                "alignment": agent.alignment,
+                "status": agent.status
+            },
+            "private_information": {
+                "storyteller_told_me": agent.memory.get("private_info"),
+                "private_clues": agent.memory.get("private_clues", []),
+                "role_ability": agent.role_details.get("description", "No description available")
+            },
+            "my_actions": {
+                "votes_cast": agent.memory.get("votes", []),
+                "nominations_made": agent.memory.get("nominations", []),
+                "actions_taken": agent.memory.get("actions_taken", [])
+            },
+            "my_observations": {
+                "important_events": agent.memory.get("important_events", []),
+                "observations": agent.memory.get("observations", [])
+            },
+            "communications": {
+                "public_chat_log": agent.memory.get("public_chat_log", []),
+                "private_conversations": self._format_private_conversations(agent.memory.get("private_chat_logs", {}))
+            },
+            "game_context": {
+                "current_phase": self.grimoire.current_phase if self.grimoire else "Unknown",
+                "day_number": self.grimoire.day_number if self.grimoire else 0,
+                "players_alive": len([p for p in self.grimoire.players if self.grimoire.statuses.get(p, {}).get("alive", True)]) if self.grimoire else 0,
+                "total_players": len(self.grimoire.players) if self.grimoire else 0
+            }
+        }
+        
+        return perspective
+    
+    def _format_private_conversations(self, private_chat_logs: Dict[str, List]) -> Dict[str, Any]:
+        """Format private conversations for display"""
+        formatted_convos = {}
+        for partner_id, messages in private_chat_logs.items():
+            partner_name = self.grimoire.players.get(partner_id, {}).get("name", partner_id) if self.grimoire else partner_id
+            formatted_convos[partner_name] = {
+                "partner_id": partner_id,
+                "messages": messages
+            }
+        return formatted_convos
 
 game_manager = GameManager()
 #get player names for logging etc.
@@ -1202,6 +1378,96 @@ async def save_logs():
         json.dump(comprehensive_logs, f, indent=2, default=str)
     
     return {"message": "comprehensive logs saved successfully", "filepath": filepath}
+
+@app.get("/debug/bot_info")
+async def get_bot_debug_info():
+    """Get detailed debugging information for all bots"""
+    if not game_manager.grimoire:
+        return {"error": "no game in progress"}
+    
+    bot_info = {
+        "storyteller": {
+            "type": "storyteller",
+            "status": "active",
+            "memory": {
+                "game_state": {
+                    "current_phase": game_manager.grimoire.current_phase,
+                    "day_number": game_manager.grimoire.day_number,
+                    "players_alive": len([p for p in game_manager.grimoire.players if game_manager.grimoire.statuses.get(p, {}).get("alive", True)]),
+                    "total_players": len(game_manager.grimoire.players)
+                },
+                "recent_actions": game_manager.grimoire.game_log[-5:] if game_manager.grimoire.game_log else [],
+                "pending_actions": getattr(game_manager, 'pending_storyteller_actions', {})
+            },
+            "stats": {
+                "total_decisions": len(game_manager.grimoire.storyteller_log),
+                "game_events_processed": len(game_manager.grimoire.game_log)
+            }
+        },
+        "players": {}
+    }
+    
+    # Add player bot information
+    for player_id, agent in game_manager.agents.items():
+        player_info = game_manager.grimoire.players.get(player_id, {})
+        bot_info["players"][player_id] = {
+            "type": "player",
+            "name": player_info.get("name", player_id),
+            "role": agent.role,
+            "alignment": agent.alignment,
+            "status": agent.status,
+            "memory": {
+                "private_info": agent.memory.get("private_info"),
+                "important_events": agent.memory.get("important_events", []),
+                "private_clues": agent.memory.get("private_clues", []),
+                "chat_messages_count": len(agent.memory.get("public_chat_log", [])),
+                "private_conversations": len(agent.memory.get("private_chat_logs", {}))
+            },
+            "stats": {
+                "actions_taken": len(agent.memory.get("actions_taken", [])),
+                "observations_made": len(agent.memory.get("observations", [])),
+                "votes_cast": len(agent.memory.get("votes", []))
+            }
+        }
+    
+    return bot_info
+
+def generate_random_player_names(count: int) -> List[str]:
+    """Generate a list of random player names for AI players."""
+    first_names = [
+        "Alex", "Blake", "Casey", "Drew", "Emery", "Finley", "Gray", "Harper", 
+        "Indigo", "Jordan", "Kai", "Lane", "Morgan", "Nova", "Oakley", "Parker",
+        "Quinn", "River", "Sage", "Taylor", "Uma", "Vale", "Wren", "Xander",
+        "Yuki", "Zara", "Avery", "Bryce", "Cameron", "Dakota", "Ellis", "Frankie",
+        "Gale", "Hayden", "Iris", "Jules", "Kendall", "Logan", "Marley", "Nico",
+        "Orion", "Peyton", "Reese", "Skyler", "Tatum", "Unity", "Vega", "Winter",
+        "Xylo", "Yarrow", "Zen", "Aspen", "Bay", "Cedar", "Dove", "Echo",
+        "Fern", "Grove", "Haven", "Ivy", "Jade", "Knox", "Lark", "Moss",
+        "North", "Ocean", "Pine", "Quest", "Rain", "Storm", "True", "Vale"
+    ]
+    
+    last_names = [
+        "Stone", "Rivers", "Woods", "Fields", "Brooks", "Cross", "Vale", "Hill",
+        "Fox", "Wolf", "Bear", "Hawk", "Raven", "Swift", "Bright", "Sharp",
+        "Wild", "Free", "Bold", "Wise", "Kind", "True", "Fair", "Strong",
+        "Grace", "Hope", "Joy", "Peace", "Dawn", "Moon", "Star", "Sun",
+        "Storm", "Rain", "Snow", "Wind", "Fire", "Earth", "Sky", "Sea",
+        "North", "South", "East", "West", "Blue", "Green", "Gold", "Silver",
+        "Black", "White", "Gray", "Red", "Rose", "Sage", "Pine", "Oak",
+        "Ash", "Elm", "Birch", "Cedar", "Maple", "Willow", "Hazel", "Rowan"
+    ]
+    
+    # Shuffle both lists to ensure randomness
+    random.shuffle(first_names)
+    random.shuffle(last_names)
+    
+    names = []
+    for i in range(count):
+        first = first_names[i % len(first_names)]
+        last = last_names[i % len(last_names)]
+        names.append(f"{first} {last}")
+    
+    return names
 
 if __name__ == "__main__":
     print("Starting game server on http://localhost:8000")

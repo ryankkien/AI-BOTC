@@ -6,6 +6,8 @@ import ChatPanel from './components/ChatPanel';
 import Controls from './components/Controls';
 import PrivateInfoPanel from './components/PrivateInfoPanel';
 import LLMDebugPanel from './components/LLMDebugPanel';
+import EnhancedDebugPanel from './components/EnhancedDebugPanel';
+import DebugDashboard from './components/DebugDashboard';
 
 //typically the backend URL would be in an env variable
 const SOCKET_URL = "ws://localhost:8000/ws"; //assumes FastAPI WebSocket is at /ws, adjust if using python-socketio which has its own path
@@ -21,6 +23,8 @@ function App() {
   const [storytellerLLMDebug, setStorytellerLLMDebug] = useState({ prompts: [], responses: [] });
   const [selectedPlayerId, setSelectedPlayerId] = useState(null);
   const [showStorytellerDebug, setShowStorytellerDebug] = useState(false);
+  const [showEnhancedDebug, setShowEnhancedDebug] = useState(false);
+  const [showDebugDashboard, setShowDebugDashboard] = useState(false);
   const [activeLogTab, setActiveLogTab] = useState('player');
   const playerMessages = messages.filter(msg => msg.sender !== 'Storyteller');
   const gameMessages = messages.filter(msg => msg.sender === 'Storyteller');
@@ -47,22 +51,54 @@ function App() {
         //handle different types of messages from the server
         switch (data.type) {
           case 'LLM_DEBUG':
-            const { agent, prompt, response } = data.payload;
+            const { agent, type: debugType, content, timestamp, provider, prompt_length, response_length, generation_time_seconds, prompt_hash } = data.payload;
+            
+            const debugEntry = {
+              content,
+              timestamp: timestamp || new Date().toISOString(),
+              provider,
+              prompt_length,
+              response_length,
+              generation_time_seconds,
+              prompt_hash
+            };
+
             if (agent === 'storyteller') {
-              setStorytellerLLMDebug(prev => ({
-                prompts: prompt ? [...prev.prompts, prompt] : prev.prompts,
-                responses: response ? [...prev.responses, response] : prev.responses
-              }));
+              setStorytellerLLMDebug(prev => {
+                if (debugType === 'prompt') {
+                  return {
+                    ...prev,
+                    prompts: [...prev.prompts, debugEntry]
+                  };
+                } else if (debugType === 'response') {
+                  return {
+                    ...prev,
+                    responses: [...prev.responses, debugEntry]
+                  };
+                }
+                return prev;
+              });
             } else {
               setPlayerLLMDebug(prev => {
                 const entry = prev[agent] || { prompts: [], responses: [] };
-                return {
-                  ...prev,
-                  [agent]: {
-                    prompts: prompt ? [...entry.prompts, prompt] : entry.prompts,
-                    responses: response ? [...entry.responses, response] : entry.responses
-                  }
-                };
+                if (debugType === 'prompt') {
+                  return {
+                    ...prev,
+                    [agent]: {
+                      ...entry,
+                      prompts: [...entry.prompts, debugEntry]
+                    }
+                  };
+                } else if (debugType === 'response') {
+                  return {
+                    ...prev,
+                    [agent]: {
+                      ...entry,
+                      responses: [...entry.responses, debugEntry]
+                    }
+                  };
+                }
+                return prev;
               });
             }
             break;
@@ -230,6 +266,30 @@ function App() {
               title={`Player ${selectedPlayerId} LLM Debug`}
               debugData={playerLLMDebug[selectedPlayerId] || { prompts: [], responses: [] }}
               onClose={() => setSelectedPlayerId(null)}
+            />
+          )}
+          <button onClick={() => setShowEnhancedDebug(prev => !prev)} style={{ margin: '5px', padding: '5px' }}>
+            {showEnhancedDebug ? 'Hide' : 'View'} Enhanced Debug
+          </button>
+          {showEnhancedDebug && (
+            <EnhancedDebugPanel
+              playerLLMDebug={playerLLMDebug}
+              storytellerLLMDebug={storytellerLLMDebug}
+              players={players}
+              gameState={gameState}
+              onClose={() => setShowEnhancedDebug(false)}
+            />
+          )}
+          <button onClick={() => setShowDebugDashboard(prev => !prev)} style={{ margin: '5px', padding: '5px' }}>
+            {showDebugDashboard ? 'Hide' : 'View'} Debug Dashboard
+          </button>
+          {showDebugDashboard && (
+            <DebugDashboard
+              playerLLMDebug={playerLLMDebug}
+              storytellerLLMDebug={storytellerLLMDebug}
+              players={players}
+              gameState={gameState}
+              onClose={() => setShowDebugDashboard(false)}
             />
           )}
         </div>

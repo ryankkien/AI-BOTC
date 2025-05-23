@@ -9,6 +9,8 @@ import time
 from typing import Optional, Dict, Any, List
 from abc import ABC, abstractmethod
 from dotenv import load_dotenv
+from datetime import datetime
+import json
 
 # Import different provider libraries
 try:
@@ -260,33 +262,60 @@ class UnifiedLLMClient:
         """Generate content with unified interface matching the original Gemini interface"""
         await global_rate_limit()
         
-        # Debug logging
+        timestamp = datetime.utcnow().isoformat()
+        agent_id = getattr(self, '_agent_id', 'unknown')
+        
+        # Debug logging for prompt
         if self.game_manager:
             try:
                 await self.game_manager.broadcast_message("LLM_DEBUG", {
-                    "agent": getattr(self, '_agent_id', 'unknown'),
-                    "prompt": prompt,
-                    "provider": type(self.provider).__name__
+                    "agent": agent_id,
+                    "type": "prompt",
+                    "content": prompt,
+                    "provider": type(self.provider).__name__,
+                    "timestamp": timestamp,
+                    "prompt_length": len(prompt),
+                    "kwargs": kwargs
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Debug logging error (prompt): {e}")
         
         try:
+            start_time = time.time()
             response_text = await self.provider.generate_async(prompt, **kwargs)
+            end_time = time.time()
             
-            # Debug logging
+            # Debug logging for response
             if self.game_manager:
                 try:
                     await self.game_manager.broadcast_message("LLM_DEBUG", {
-                        "agent": getattr(self, '_agent_id', 'unknown'),
-                        "response": response_text,
-                        "provider": type(self.provider).__name__
+                        "agent": agent_id,
+                        "type": "response",
+                        "content": response_text,
+                        "provider": type(self.provider).__name__,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "response_length": len(response_text),
+                        "generation_time_seconds": round(end_time - start_time, 2),
+                        "prompt_hash": hash(prompt) % 10000  # Simple hash for correlation
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Debug logging error (response): {e}")
             
             return MockResponse(response_text)
         except Exception as e:
+            # Debug logging for errors
+            if self.game_manager:
+                try:
+                    await self.game_manager.broadcast_message("LLM_DEBUG", {
+                        "agent": agent_id,
+                        "type": "error",
+                        "content": str(e),
+                        "provider": type(self.provider).__name__,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "prompt_hash": hash(prompt) % 10000
+                    })
+                except Exception:
+                    pass
             print(f"LLM generation error: {e}")
             raise
     
