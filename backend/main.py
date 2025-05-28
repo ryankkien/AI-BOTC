@@ -1446,26 +1446,13 @@ def generate_random_player_names(count: int) -> List[str]:
         "North", "Ocean", "Pine", "Quest", "Rain", "Storm", "True", "Vale"
     ]
     
-    last_names = [
-        "Stone", "Rivers", "Woods", "Fields", "Brooks", "Cross", "Vale", "Hill",
-        "Fox", "Wolf", "Bear", "Hawk", "Raven", "Swift", "Bright", "Sharp",
-        "Wild", "Free", "Bold", "Wise", "Kind", "True", "Fair", "Strong",
-        "Grace", "Hope", "Joy", "Peace", "Dawn", "Moon", "Star", "Sun",
-        "Storm", "Rain", "Snow", "Wind", "Fire", "Earth", "Sky", "Sea",
-        "North", "South", "East", "West", "Blue", "Green", "Gold", "Silver",
-        "Black", "White", "Gray", "Red", "Rose", "Sage", "Pine", "Oak",
-        "Ash", "Elm", "Birch", "Cedar", "Maple", "Willow", "Hazel", "Rowan"
-    ]
-    
-    # Shuffle both lists to ensure randomness
+    # Shuffle the list to ensure randomness
     random.shuffle(first_names)
-    random.shuffle(last_names)
     
+    # Return just first names, cycling through if we need more than available
     names = []
     for i in range(count):
-        first = first_names[i % len(first_names)]
-        last = last_names[i % len(last_names)]
-        names.append(f"{first} {last}")
+        names.append(first_names[i % len(first_names)])
     
     return names
 
