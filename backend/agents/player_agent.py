@@ -19,6 +19,7 @@ class PlayerAgent(BaseAgent):
         super().__init__(player_id, role, alignment)
         self.llm = None
         self.game_manager = game_manager
+        self.game_settings = None  #reference to game settings, set by game manager
         
         # Create LLM provider using the factory
         try:
@@ -351,6 +352,12 @@ class PlayerAgent(BaseAgent):
             return False #safer default
 
     async def _curate_memory(self, event_type: str, data: Any):
+        #check if memory curator is enabled in settings
+        if self.game_settings and not self.game_settings.memory_curator_enabled:
+            #if memory curator is disabled, store everything as important
+            self.memory.setdefault("important_events", []).append({"type": event_type, "data": data})
+            return
+        
         # use LLM to decide if an event is worth remembering long-term
         if not self.llm or not self.status.get("alive", False):
             return

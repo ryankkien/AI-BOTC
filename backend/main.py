@@ -16,6 +16,29 @@ from .agents.player_agent import PlayerAgent
 from .agents.base_agent import BaseAgent #if we need to type hint with base class
 from .agents.storyteller_agent import StorytellerAgent
 
+#game settings configuration
+class GameSettings:
+    def __init__(self):
+        self.memory_curator_enabled = True
+        self.auto_night_actions = True
+        self.verbose_logging = True
+        self.ai_chat_frequency = "normal"  #"low", "normal", "high"
+        self.private_chat_enabled = True
+    
+    def to_dict(self):
+        return {
+            "memory_curator_enabled": self.memory_curator_enabled,
+            "auto_night_actions": self.auto_night_actions,
+            "verbose_logging": self.verbose_logging,
+            "ai_chat_frequency": self.ai_chat_frequency,
+            "private_chat_enabled": self.private_chat_enabled
+        }
+    
+    def update_from_dict(self, settings_dict):
+        for key, value in settings_dict.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
 #temp html for testing - can be removed later or served from frontend proper
 html = """
 <!DOCTYPE html>
@@ -47,14 +70,213 @@ html = """
             .connection-bar { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; }
             .role-item.selected { background-color: #007bff; color: white; font-weight: bold; }
             h1, h2, h3 { margin-top: 0; }
+            
+            /* settings popup styles */
+            .settings-overlay { 
+                display: none; 
+                position: fixed; 
+                top: 0; 
+                left: 0; 
+                width: 100%; 
+                height: 100%; 
+                background-color: rgba(0,0,0,0.5); 
+                z-index: 1000; 
+            }
+            .settings-popup { 
+                position: absolute; 
+                top: 50%; 
+                left: 50%; 
+                transform: translate(-50%, -50%); 
+                background: white; 
+                padding: 20px; 
+                border-radius: 10px; 
+                box-shadow: 0 4px 20px rgba(0,0,0,0.3); 
+                min-width: 400px; 
+                max-width: 600px; 
+            }
+            .settings-section { 
+                margin-bottom: 20px; 
+                padding: 15px; 
+                border: 1px solid #ddd; 
+                border-radius: 5px; 
+                background-color: #f9f9f9; 
+            }
+            .settings-section h3 { 
+                margin-top: 0; 
+                color: #333; 
+                border-bottom: 1px solid #ddd; 
+                padding-bottom: 5px; 
+            }
+            .setting-item { 
+                display: flex; 
+                justify-content: space-between; 
+                align-items: center; 
+                margin-bottom: 10px; 
+            }
+            .setting-item:last-child { 
+                margin-bottom: 0; 
+            }
+            .setting-label { 
+                flex-grow: 1; 
+                margin-right: 10px; 
+                font-weight: 500; 
+            }
+            .setting-description { 
+                font-size: 12px; 
+                color: #666; 
+                margin-top: 2px; 
+            }
+            .setting-control { 
+                flex-shrink: 0; 
+            }
+            .toggle-switch { 
+                position: relative; 
+                width: 50px; 
+                height: 24px; 
+                background-color: #ccc; 
+                border-radius: 12px; 
+                cursor: pointer; 
+                transition: background-color 0.3s; 
+            }
+            .toggle-switch.active { 
+                background-color: #4CAF50; 
+            }
+            .toggle-slider { 
+                position: absolute; 
+                top: 2px; 
+                left: 2px; 
+                width: 20px; 
+                height: 20px; 
+                background-color: white; 
+                border-radius: 10px; 
+                transition: transform 0.3s; 
+            }
+            .toggle-switch.active .toggle-slider { 
+                transform: translateX(26px); 
+            }
+            .settings-buttons { 
+                display: flex; 
+                justify-content: flex-end; 
+                gap: 10px; 
+                margin-top: 20px; 
+            }
+            .btn { 
+                padding: 8px 16px; 
+                border: none; 
+                border-radius: 4px; 
+                cursor: pointer; 
+                transition: background-color 0.3s; 
+            }
+            .btn-primary { 
+                background-color: #007bff; 
+                color: white; 
+            }
+            .btn-primary:hover { 
+                background-color: #0056b3; 
+            }
+            .btn-secondary { 
+                background-color: #6c757d; 
+                color: white; 
+            }
+            .btn-secondary:hover { 
+                background-color: #545b62; 
+            }
+            select { 
+                padding: 4px 8px; 
+                border: 1px solid #ccc; 
+                border-radius: 4px; 
+            }
         </style>
     </head>
     <body>
+        <!-- settings popup overlay -->
+        <div id="settingsOverlay" class="settings-overlay">
+            <div class="settings-popup">
+                <h2>⚙️ Game Settings</h2>
+                
+                <div class="settings-section">
+                    <h3>AI Behavior Settings</h3>
+                    
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Memory Curator</div>
+                            <div class="setting-description">when enabled, ai players use llm to filter important memories. when disabled, they remember everything.</div>
+                        </div>
+                        <div class="setting-control">
+                            <div id="memoryCuratorToggle" class="toggle-switch active">
+                                <div class="toggle-slider"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Private Chat</div>
+                            <div class="setting-description">allow ai players to have private conversations during night phases</div>
+                        </div>
+                        <div class="setting-control">
+                            <div id="privateChatToggle" class="toggle-switch active">
+                                <div class="toggle-slider"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">AI Chat Frequency</div>
+                            <div class="setting-description">how often ai players will chat during day phases</div>
+                        </div>
+                        <div class="setting-control">
+                            <select id="chatFrequencySelect">
+                                <option value="low">Low</option>
+                                <option value="normal" selected>Normal</option>
+                                <option value="high">High</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="settings-section">
+                    <h3>Game Flow Settings</h3>
+                    
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Auto Night Actions</div>
+                            <div class="setting-description">automatically process night actions without manual storyteller intervention</div>
+                        </div>
+                        <div class="setting-control">
+                            <div id="autoNightToggle" class="toggle-switch active">
+                                <div class="toggle-slider"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Verbose Logging</div>
+                            <div class="setting-description">detailed logging for debugging and analysis</div>
+                        </div>
+                        <div class="setting-control">
+                            <div id="verboseLoggingToggle" class="toggle-switch active">
+                                <div class="toggle-slider"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="settings-buttons">
+                    <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+                    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+                </div>
+            </div>
+        </div>
+
         <div class="connection-bar">
             Player ID (Observer): <input type="text" id="observerId" value="ObserverClient"/>
             <button onclick="connectWs()">Connect</button>
             <button onclick="requestGameStart()">Start 10-AI Player Game</button>
             <button onclick="saveLogs()">Save Comprehensive Logs</button>
+            <button onclick="openSettings()">⚙️ Settings</button>
         </div>
         <div class="container">
             <div class="main-content">
@@ -85,6 +307,74 @@ html = """
             const messagesList = document.getElementById('messages');
             const playerRolesList = document.getElementById('playerRoles');
             var rolesMap = {}; // map of playerId to role for observer display
+            var currentSettings = {
+                memory_curator_enabled: true,
+                auto_night_actions: true,
+                verbose_logging: true,
+                ai_chat_frequency: "normal",
+                private_chat_enabled: true
+            };
+
+            // settings ui functions
+            function openSettings() {
+                // request current settings from server
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: "REQUEST_SETTINGS" }));
+                }
+                updateSettingsUI();
+                document.getElementById('settingsOverlay').style.display = 'block';
+            }
+
+            function closeSettings() {
+                document.getElementById('settingsOverlay').style.display = 'none';
+            }
+
+            function updateSettingsUI() {
+                document.getElementById('memoryCuratorToggle').classList.toggle('active', currentSettings.memory_curator_enabled);
+                document.getElementById('privateChatToggle').classList.toggle('active', currentSettings.private_chat_enabled);
+                document.getElementById('autoNightToggle').classList.toggle('active', currentSettings.auto_night_actions);
+                document.getElementById('verboseLoggingToggle').classList.toggle('active', currentSettings.verbose_logging);
+                document.getElementById('chatFrequencySelect').value = currentSettings.ai_chat_frequency;
+            }
+
+            function saveSettings() {
+                // collect settings from ui
+                const newSettings = {
+                    memory_curator_enabled: document.getElementById('memoryCuratorToggle').classList.contains('active'),
+                    private_chat_enabled: document.getElementById('privateChatToggle').classList.contains('active'),
+                    auto_night_actions: document.getElementById('autoNightToggle').classList.contains('active'),
+                    verbose_logging: document.getElementById('verboseLoggingToggle').classList.contains('active'),
+                    ai_chat_frequency: document.getElementById('chatFrequencySelect').value
+                };
+                
+                // send to server
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ 
+                        type: "UPDATE_SETTINGS", 
+                        payload: newSettings 
+                    }));
+                    currentSettings = newSettings;
+                    addMessageToList(storytellerLog, "settings updated successfully", "info-message");
+                }
+                
+                closeSettings();
+            }
+
+            // toggle switch click handlers
+            document.addEventListener('DOMContentLoaded', function() {
+                ['memoryCuratorToggle', 'privateChatToggle', 'autoNightToggle', 'verboseLoggingToggle'].forEach(id => {
+                    document.getElementById(id).addEventListener('click', function() {
+                        this.classList.toggle('active');
+                    });
+                });
+                
+                // close settings when clicking overlay
+                document.getElementById('settingsOverlay').addEventListener('click', function(e) {
+                    if (e.target === this) {
+                        closeSettings();
+                    }
+                });
+            });
 
             function formatPlayerPerspective(perspective) {
                 if (perspective.error) {
@@ -287,6 +577,12 @@ html = """
                             const playerName = perspective.player_info ? perspective.player_info.name : memPid;
                             document.getElementById('memoryHeader').textContent = `${playerName}'s Perspective`;
                             break;
+                        case "SETTINGS_UPDATE":
+                            // server sent current settings
+                            currentSettings = payload;
+                            updateSettingsUI();
+                            addMessageToList(storytellerLog, "received current settings from server", "info-message");
+                            break;
                         default:
                             addMessageToList(storytellerLog, `UNKNOWN [${messageType}]: ${displayText}`, "game-event");
                     }
@@ -355,6 +651,7 @@ class GameManager:
         self.agents: Dict[str, BaseAgent] = {}
         self.active_connections: Dict[str, WebSocket] = {} #player_id to websocket
         self.game_loop_task: Optional[asyncio.Task] = None
+        self.settings = GameSettings()  #add game settings
         
         # LLM configuration - support multiple providers
         self.llm_provider_type = os.getenv("LLM_PROVIDER", "auto")
@@ -776,6 +1073,8 @@ class GameManager:
                     if role_details.get("has_red_herring", False):
                         private_payload["red_herring"] = getattr(self.grimoire, "fortune_teller_red_herring", None)
                     agent.memory["private_info"] = private_payload
+                    # set game settings reference
+                    agent.game_settings = self.settings
                 else:
                      print(f"Player {display_name} ({actual_role_name}) is a human player.")
             # --- End of PlayerAgent setup ---
@@ -1193,6 +1492,26 @@ class GameManager:
             else:
                 print(f"REQUEST_MEMORY for unknown player {requested}")
 
+        elif msg_type == "REQUEST_SETTINGS":
+            # send current settings to the requesting client
+            await self.send_personal_message(player_id, "SETTINGS_UPDATE", self.settings.to_dict())
+
+        elif msg_type == "UPDATE_SETTINGS":
+            # update settings from client
+            if payload and isinstance(payload, dict):
+                self.settings.update_from_dict(payload)
+                print(f"settings updated by {player_id}: {self.settings.to_dict()}")
+                # apply settings to existing agents if game is running
+                if self.agents:
+                    for agent in self.agents.values():
+                        if hasattr(agent, 'memory_curator_enabled'):
+                            agent.memory_curator_enabled = self.settings.memory_curator_enabled
+                        #update agent references to settings
+                        agent.game_settings = self.settings
+                await self.send_personal_message(player_id, "INFO", "settings updated successfully")
+            else:
+                await self.send_personal_message(player_id, "ERROR", "invalid settings payload")
+
         else:
             print(f"unknown message type from {player_id}: {msg_type}")
 
@@ -1431,6 +1750,24 @@ async def get_bot_debug_info():
         }
     
     return bot_info
+
+@app.get("/settings")
+async def get_settings():
+    """get current game settings"""
+    return game_manager.settings.to_dict()
+
+@app.post("/settings")
+async def update_settings(settings_update: dict):
+    """update game settings"""
+    try:
+        game_manager.settings.update_from_dict(settings_update)
+        #apply settings to existing agents if game is running
+        if game_manager.agents:
+            for agent in game_manager.agents.values():
+                agent.game_settings = game_manager.settings
+        return {"success": True, "settings": game_manager.settings.to_dict()}
+    except Exception as e:
+        return {"error": f"failed to update settings: {str(e)}"}
 
 def generate_random_player_names(count: int) -> List[str]:
     """Generate a list of random player names for AI players."""
