@@ -669,6 +669,7 @@ class GameManager:
         self._current_nominating_player_index: int = 0
         self._nomination_order: List[str] = []
         self._daily_chat_log: List[Dict[str,str]] = [] #to feed to agents for day decisions
+        self.pending_storyteller_actions: Dict[str, Dict[str, Any]] = {} # Initialize this early
         
         # initialize LLM-based storyteller with new system
         self.storyteller_agent = StorytellerAgent(
@@ -694,6 +695,31 @@ class GameManager:
 
     def is_game_running(self) -> bool:
         return self.grimoire is not None and self.rule_enforcer is not None and not self._game_started_event.is_set()
+    
+    def check_victory_conditions(self) -> Optional[Dict[str, str]]:
+        """Check if the game should end and return winner info if so."""
+        if not self.grimoire:
+            return None
+            
+        alive_players = [pid for pid in self.grimoire.players if self.grimoire.is_player_alive(pid)]
+        alive_evil = [pid for pid in alive_players if self.grimoire.get_player_alignment(pid) == "Evil"]
+        alive_good = [pid for pid in alive_players if self.grimoire.get_player_alignment(pid) == "Good"]
+        demon_players = [pid for pid in self.grimoire.players if self.grimoire.get_player_role(pid) == "Imp"]
+        alive_demons = [pid for pid in demon_players if self.grimoire.is_player_alive(pid)]
+        
+        # Evil wins if only 2 players remain (final 2)
+        if len(alive_players) <= 2:
+            return {"winner": "Evil", "reason": "Only 2 players remain"}
+            
+        # Good wins if no demons are alive
+        if not alive_demons:
+            return {"winner": "Good", "reason": "All demons are dead"}
+            
+        # Evil wins if all good players are dead
+        if not alive_good:
+            return {"winner": "Evil", "reason": "All good players are dead"}
+            
+        return None
 
     def get_available_actions(self, player_id: str, action_type: str) -> List[str]:
         #return canonical list of what actions a given player can take for a specific action_type
@@ -847,9 +873,58 @@ class GameManager:
             if self.grimoire and "key_path" in params and "value" in params:
                 key_path = params["key_path"]
                 value = params["value"]
-                if len(key_path) == 1:
-                    setattr(self.grimoire, key_path[0], value)
-                    print(f"Set grimoire.{key_path[0]} = {value}")
+                
+                # Special handling for players dict to properly populate grimoire
+                if key_path == ["players"] and isinstance(value, dict):
+                    print("Special handling for players dict - populating grimoire properly")
+                    for player_id, player_data in value.items():
+                        if isinstance(player_data, str):
+                            # Storyteller is sending player_id -> role_name mapping
+                            role = player_data
+                            role_details = get_role_details(role)
+                            alignment = role_details["alignment"].value if role_details else "Good"
+                            self.grimoire.add_player(player_id, role, alignment)
+                        else:
+                            # Storyteller is sending player_id -> {role, alignment, status} mapping
+                            role = player_data.get("role")
+                            alignment = player_data.get("alignment") 
+                            if role and alignment:
+                                self.grimoire.add_player(player_id, role, alignment)
+                    print(f"Added {len(value)} players to grimoire")
+                # Handle setting players as a list
+                elif key_path == ["players"] and isinstance(value, list):
+                    print("Setting grimoire players list")
+                    self.grimoire.players = value
+                    print(f"Set grimoire.players = {value}")
+                # Handle setting roles directly
+                elif key_path == ["roles"] and isinstance(value, dict):
+                    print("Updating grimoire roles")
+                    for player_id, role in value.items():
+                        self.grimoire.roles[player_id] = role
+                    print(f"Updated roles for {len(value)} players")
+                # Handle setting alignments directly  
+                elif key_path == ["alignments"] and isinstance(value, dict):
+                    print("Updating grimoire alignments")
+                    for player_id, alignment in value.items():
+                        self.grimoire.alignments[player_id] = alignment
+                    print(f"Updated alignments for {len(value)} players")
+                # Handle setting statuses directly
+                elif key_path == ["statuses"] and isinstance(value, dict):
+                    print("Updating grimoire statuses")
+                    for player_id, status in value.items():
+                        if player_id not in self.grimoire.statuses:
+                            self.grimoire.statuses[player_id] = {}
+                        self.grimoire.statuses[player_id].update(status)
+                    print(f"Updated statuses for {len(value)} players")
+                elif len(key_path) == 1:
+                    # Handle seating_order -> players conversion
+                    if key_path[0] == "seating_order" and isinstance(value, list):
+                        # Update the grimoire players list to match seating order
+                        self.grimoire.players = value
+                        print(f"Set grimoire.players (seating order) = {value}")
+                    else:
+                        setattr(self.grimoire, key_path[0], value)
+                        print(f"Set grimoire.{key_path[0]} = {value}")
                 elif len(key_path) > 1:
                     obj = self.grimoire
                     for key_segment in key_path[:-1]:
@@ -872,10 +947,35 @@ class GameManager:
 
         elif command_type == "EXECUTE_PLAYER":
             if self.rule_enforcer and "player_id" in params and "reason" in params:
-                self.rule_enforcer._execute_player(params["player_id"], params["reason"])
-                await self.broadcast_game_event(f"Player {self.grimoire.game_state.get('player_names',{}).get(params['player_id'], params['player_id'])} has died due to: {params['reason']}")
+                player_id = params["player_id"]
+                reason = params["reason"]
+                # Execute the player
+                self.rule_enforcer._execute_player(player_id, reason)
+                player_name = self.grimoire.game_state.get('player_names',{}).get(player_id, player_id)
+                await self.broadcast_game_event(f"Player {player_name} has died due to: {reason}")
+                
+                # Check victory conditions after execution
+                victory_result = self.check_victory_conditions()
+                if victory_result:
+                    print(f"Victory condition met after execution: {victory_result}")
+                    await self.execute_storyteller_command({
+                        "command": "END_GAME", 
+                        "params": victory_result
+                    })
             else:
                 print(f"EXECUTE_PLAYER Error: Missing rule_enforcer or params: {params}")
+        
+        elif command_type == "CHECK_VICTORY":
+            # Allow Storyteller to manually check victory conditions
+            victory_result = self.check_victory_conditions()
+            if victory_result:
+                print(f"Manual victory check result: {victory_result}")
+                await self.execute_storyteller_command({
+                    "command": "END_GAME",
+                    "params": victory_result
+                })
+            else:
+                print("No victory conditions met at this time")
         
         elif command_type == "REQUEST_PLAYER_ACTION":
             player_id = params.get("player_id")
@@ -987,9 +1087,10 @@ class GameManager:
             setup_commands = await self.storyteller_agent.generate_commands(initial_context)
             print(f"Received setup commands from Storyteller LLM: {setup_commands}")
 
-            # Separate state mutation commands from personal message commands to defer private info until agents exist
-            state_commands = [cmd for cmd in setup_commands if cmd.get("command") != "SEND_PERSONAL_MESSAGE"]
+            # Separate state mutation commands from personal message and player action commands to defer until agents exist
+            state_commands = [cmd for cmd in setup_commands if cmd.get("command") not in ["SEND_PERSONAL_MESSAGE", "REQUEST_PLAYER_ACTION", "AWAIT_PLAYER_RESPONSES"]]
             deferred_private_msgs = [cmd for cmd in setup_commands if cmd.get("command") == "SEND_PERSONAL_MESSAGE"]
+            deferred_player_actions = [cmd for cmd in setup_commands if cmd.get("command") in ["REQUEST_PLAYER_ACTION", "AWAIT_PLAYER_RESPONSES"]]
             # First, apply all state-changing commands
             for command_obj in state_commands:
                 await self.execute_storyteller_command(command_obj)
@@ -1008,6 +1109,20 @@ class GameManager:
             all_player_role_info = [] # For broadcasting roles to observer
 
             # Ensure all players from input are in grimoire after ST LLM setup
+            # If Storyteller didn't set up players properly, we'll do it as fallback
+            if not self.grimoire.players:
+                print("Storyteller LLM didn't set up players. Setting up manually as fallback.")
+                for player_id, role_name in player_ids_roles.items():
+                    role_details = get_role_details(role_name)
+                    alignment = role_details["alignment"].value if role_details else "Unknown"
+                    self.grimoire.add_player(player_id, role_name, alignment)
+                
+                # Set initial phase if not set
+                if not self.grimoire.current_phase:
+                    self.grimoire.current_phase = "FIRST_NIGHT"
+                    self.grimoire.day_number = 0
+                    print("Set initial phase to FIRST_NIGHT manually")
+            
             for player_id, role_name in player_ids_roles.items():
                 if player_id not in self.grimoire.players:
                     print(f"Warning: Player {player_id} ({role_name}) was in input but not added to Grimoire by Storyteller LLM. Adding manually.")
@@ -1062,6 +1177,24 @@ class GameManager:
                         "description": role_details.get("description", ""),
                         "clues": self.grimoire.get_private_clues(player_id)
                     }
+                    
+                    # Add placeholder first night information that will be meaningful for discussion
+                    if actual_role_name == "Washerwoman":
+                        # Create a sample clue for Washerwoman
+                        other_players = [pid for pid in self.grimoire.players if pid != player_id]
+                        if len(other_players) >= 2:
+                            # Pick two players and say one is a Townsfolk
+                            target1, target2 = other_players[:2]
+                            name1 = self.grimoire.game_state.get("player_names", {}).get(target1, target1)
+                            name2 = self.grimoire.game_state.get("player_names", {}).get(target2, target2)
+                            private_payload["first_night_clue"] = f"One of {name1} or {name2} is a Townsfolk."
+                    elif actual_role_name == "Chef":
+                        # Chef learns number of evil pairs
+                        private_payload["first_night_clue"] = "You see 1 pair of evil players sitting adjacent."
+                    elif actual_role_name == "Empath":
+                        # Empath learns evil neighbor count
+                        private_payload["first_night_clue"] = "You sense 1 evil neighbor."
+                    
                     # extra info: demon/minion/red_herring if applicable
                     if role_details.get("knows_demon", False):
                         demon_ids = [pid for pid, r in self.grimoire.roles.items() if r == "Imp"]
@@ -1069,7 +1202,7 @@ class GameManager:
                     if actual_role_name == "Imp":
                         minion_ids = [pid for pid, r in self.grimoire.roles.items() if get_role_details(r)["type"] == RoleType.MINION]
                         private_payload["known_minions"] = minion_ids
-                        private_payload["demon_bluffs"] = getattr(self.grimoire, "demon_bluffs", [])
+                        private_payload["demon_bluffs"] = getattr(self.grimoire, "demon_bluffs", ["Virgin", "Monk", "Ravenkeeper"])
                     if role_details.get("has_red_herring", False):
                         private_payload["red_herring"] = getattr(self.grimoire, "fortune_teller_red_herring", None)
                     agent.memory["private_info"] = private_payload
@@ -1081,6 +1214,10 @@ class GameManager:
             
             # Replay deferred personal messages now that agents and clients are ready
             for command_obj in deferred_private_msgs:
+                await self.execute_storyteller_command(command_obj)
+            
+            # Execute deferred player actions after agents are initialized
+            for command_obj in deferred_player_actions:
                 await self.execute_storyteller_command(command_obj)
             
             # Final broadcasts after ST LLM setup and Agent init
@@ -1230,8 +1367,6 @@ class GameManager:
         if not self.grimoire:
             print("Game loop exiting: Grimoire not initialized by Storyteller LLM.")
             return
-        
-        self.pending_storyteller_actions: Dict[str, Dict[str, Any]] = {}
 
         try:
             loop_iteration = 0
@@ -1447,23 +1582,38 @@ class GameManager:
         payload = msg.get("payload")
 
         if msg_type == "REQUEST_GAME_START":
-            # start a default 10-AI player game with random roles
-            num_players = 10
+            # start a default game with proper Blood on the Clocktower role distribution
+            num_players = 7  # Start with 7 players for a balanced game
             default_player_ids = [f"AI_Player_{i}" for i in range(1, num_players + 1)]
             
             # Generate random names for the AI players
             random_names = generate_random_player_names(num_players)
             
-            # assign random roles to AI players
-            available_roles = list(ROLES_DATA.keys())
-            random.shuffle(available_roles)
-            # take as many roles as players
-            selected_roles = available_roles[:len(default_player_ids)]
+            # Create a proper role distribution for Blood on the Clocktower
+            # For 7 players: 5 Townsfolk, 1 Outsider, 0 Minions, 1 Demon
+            townsfolk_roles = ["Washerwoman", "Librarian", "Investigator", "Chef", "Empath", "Fortune Teller", "Undertaker", "Monk", "Ravenkeeper", "Virgin", "Slayer", "Soldier", "Mayor"]
+            outsider_roles = ["Drunk", "Recluse", "Saint", "Butler"]
+            minion_roles = ["Poisoner", "Spy", "Scarlet Woman", "Baron"]
+            demon_roles = ["Imp"]
+            
+            # Randomly select roles for balanced game
+            selected_roles = []
+            
+            # Always need exactly 1 Demon
+            selected_roles.extend(random.sample(demon_roles, 1))
+            
+            # For 7 players: 1 Outsider, 0 Minions, 5 Townsfolk
+            selected_roles.extend(random.sample(outsider_roles, 1))  # 1 Outsider
+            selected_roles.extend(random.sample(townsfolk_roles, 5))  # 5 Townsfolk
+            
+            # Shuffle the role assignments
+            random.shuffle(selected_roles)
             player_ids_roles = {pid: selected_roles[i] for i, pid in enumerate(default_player_ids)}
             
             # Create a mapping of player IDs to random names
             player_names_mapping = {pid: random_names[i] for i, pid in enumerate(default_player_ids)}
             
+            print(f"Starting {num_players}-player game with roles: {dict(zip(player_names_mapping.values(), selected_roles))}")
             await self.setup_new_game(player_ids_roles, human_player_ids=[], player_names=player_names_mapping)
 
         elif msg_type == "CHAT_MESSAGE":

@@ -450,7 +450,16 @@ class PlayerAgent(BaseAgent):
             return summary + "  (No specific memories recorded yet.)\n"
 
         if self.memory.get("private_info"):
-            summary += f"  Storyteller told me (private info): {self.memory['private_info']}\n"
+            private_info = self.memory['private_info']
+            summary += f"  My role: {private_info.get('role', 'Unknown')} ({private_info.get('alignment', 'Unknown')})\n"
+            if private_info.get("first_night_clue"):
+                summary += f"  First night clue: {private_info['first_night_clue']}\n"
+            if private_info.get("known_demon"):
+                summary += f"  I know the demon is: {private_info['known_demon']}\n"
+            if private_info.get("known_minions"):
+                summary += f"  I know the minions are: {private_info['known_minions']}\n"
+            if private_info.get("demon_bluffs"):
+                summary += f"  My demon bluffs are: {private_info['demon_bluffs']}\n"
         if self.memory.get("private_clues"):
             summary += f"  Private clues: {self.memory['private_clues']}\n"
         if self.memory.get("votes"):
