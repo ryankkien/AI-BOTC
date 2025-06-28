@@ -27,3 +27,7 @@ build/
 # logs
 *.log 
 *.json
+CLAUDE.md
+GEMINI.md
+GAME_FLOW.md
+*.md

@@ -152,8 +152,12 @@ const EnhancedDebugPanel = ({
     fontSize: '12px'
   };
 
-  // Get available bots
-  const availableBots = ['storyteller', ...Object.keys(playerLLMDebug)];
+  // Get available bots - include all players from the players list, not just those with debug data
+  const availableBots = [
+    'storyteller', 
+    ...players.map(p => p.id),
+    ...Object.keys(playerLLMDebug).filter(id => !players.find(p => p.id === id))
+  ];
 
   // Get current bot's data
   const getCurrentBotData = () => {
@@ -232,9 +236,25 @@ const EnhancedDebugPanel = ({
     const thoughts = getFilteredThoughts();
     
     if (thoughts.length === 0) {
+      const isStorytellerSelected = selectedBot === 'storyteller';
+      const player = players.find(p => p.id === selectedBot);
+      
       return (
         <div style={{ textAlign: 'center', color: '#6c757d', padding: '20px' }}>
-          No thoughts recorded yet for this bot.
+          <div style={{ marginBottom: '10px' }}>
+            No thoughts recorded yet for {isStorytellerSelected ? 'the Storyteller' : (player?.name || selectedBot)}.
+          </div>
+          {!isStorytellerSelected && player && (
+            <div style={{ fontSize: '11px', backgroundColor: '#f8f9fa', padding: '10px', borderRadius: '4px', margin: '10px 0' }}>
+              <strong>Agent Info:</strong><br/>
+              Role: {player.role || 'Unknown'}<br/>
+              Status: {player.isAlive ? 'Alive' : 'Dead'}<br/>
+              Alignment: {player.alignment || 'Unknown'}
+            </div>
+          )}
+          <div style={{ fontSize: '10px', color: '#999' }}>
+            Debug data will appear here when this agent makes decisions or takes actions.
+          </div>
         </div>
       );
     }
@@ -360,6 +380,14 @@ const EnhancedDebugPanel = ({
                 {getBotDisplayName(botId)}
                 <div style={{ fontSize: '10px', opacity: 0.8 }}>
                   {botId === 'storyteller' ? 'Game Master' : `Player ${botId}`}
+                  {/* Show activity indicator */}
+                  <div style={{ marginTop: '2px', fontSize: '9px' }}>
+                    {(() => {
+                      const botData = botId === 'storyteller' ? storytellerLLMDebug : (playerLLMDebug[botId] || { prompts: [], responses: [] });
+                      const totalActivity = (botData.prompts?.length || 0) + (botData.responses?.length || 0);
+                      return totalActivity > 0 ? `📊 ${totalActivity} actions` : '⚪ No activity';
+                    })()}
+                  </div>
                 </div>
               </div>
             ))}
@@ -369,7 +397,12 @@ const EnhancedDebugPanel = ({
             <h5 style={{ margin: '0 0 10px 0', fontSize: '12px' }}>Quick Stats:</h5>
             <div style={{ fontSize: '10px', color: '#6c757d' }}>
               <div>Total Bots: {availableBots.length}</div>
-              <div>Active: {availableBots.filter(id => getCurrentBotData().prompts?.length > 0).length}</div>
+              <div>Active: {availableBots.filter(id => {
+                const botData = id === 'storyteller' ? storytellerLLMDebug : (playerLLMDebug[id] || { prompts: [], responses: [] });
+                return (botData.prompts?.length || 0) + (botData.responses?.length || 0) > 0;
+              }).length}</div>
+              <div>Players: {players.length}</div>
+              <div>Alive: {players.filter(p => p.isAlive).length}</div>
             </div>
           </div>
         </div>
